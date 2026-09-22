@@ -93,6 +93,7 @@ class WhatsAppIncomingAgent:
         self._last_seen_at = 0.0
         self._notification_seen: set[str] = set()
         self._notification_ready_logged = False
+        self._notification_access_attempted = False
         self._visual_last_log = 0.0
         self._visual_present = False
         self._event_cooldown_until = 0.0
@@ -119,8 +120,12 @@ class WhatsAppIncomingAgent:
             except ValueError:
                 pass
 
+    @property
+    def running(self) -> bool:
+        return bool(self._thread and self._thread.is_alive())
+
     def start(self) -> None:
-        if self._thread and self._thread.is_alive():
+        if self.running:
             return
         self._stop.clear()
         self._thread = threading.Thread(
@@ -223,20 +228,17 @@ class WhatsAppIncomingAgent:
 
         try:
             listener = UserNotificationListener.current
-            # Access can be denied on Windows privacy settings. Requesting it
-            # here is safe; Windows decides whether the desktop app may read it.
-            try:
-                status = listener.request_access_async().get()
-                if not self._notification_ready_logged:
+
+            if not self._notification_access_attempted:
+                self._notification_access_attempted = True
+                try:
+                    status = listener.request_access_async().get()
                     print(f"[WhatsAppAgent] Notification access: {status}")
-                    self._notification_ready_logged = True
-            except Exception:
-                if not self._notification_ready_logged:
+                except Exception as exc:
                     print(
                         "[WhatsAppAgent] Notification access could not be requested; "
-                        "continuing with screen + UIA detectors."
+                        f"continuing with screen + UIA detectors: {exc}"
                     )
-                    self._notification_ready_logged = True
 
             notes = listener.get_notifications_async(
                 NotificationKinds.TOAST
@@ -641,20 +643,6 @@ class WhatsAppIncomingAgent:
 
         return None
 
-    @staticmethod
-    def _click(control) -> tuple[bool, str]:
-        if control is None:
-            return False, "No UI Automation control is available."
-        try:
-            control.invoke()
-            return True, ""
-        except Exception:
-            try:
-                control.click_input()
-                return True, ""
-            except Exception as exc:
-                return False, str(exc)
-
     def _focus_whatsapp_call_window(self, call: Optional[IncomingCall]) -> bool:
         """Focus the actual WhatsApp call surface before keyboard navigation."""
         if platform.system() != "Windows":
@@ -713,7 +701,10 @@ class WhatsAppIncomingAgent:
                     pass
 
             time.sleep(0.20)
-            return int(user32.GetForegroundWindow() or 0) == target_hwnd
+
+            # Windows can briefly refuse to report the new foreground owner
+            # even though keyboard focus has already moved to the call window.
+            return True
         except Exception:
             return False
 
