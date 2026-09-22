@@ -3,9 +3,9 @@
 The rule is armed by a normal JARVIS command such as:
     "If anyone calls me, tell them I am not available right now."
 
-While armed, a daemon thread watches the Windows desktop. It uses Gemini vision to identify a WhatsApp incoming-call surface, then uses
-Windows UI Automation to invoke the Answer/Decline/End controls directly
-without moving the physical mouse.
+While armed, a daemon thread watches the Windows desktop. It uses Gemini vision
+to identify a WhatsApp call surface, then uses Windows UI Automation to invoke
+the Answer/Decline/End controls directly without moving or clicking the mouse.
 
 The rule is process-local: it stays active until disabled or JARVIS exits.
 """
@@ -51,178 +51,6 @@ def _make_dpi_aware() -> None:
         shcore.SetProcessDpiAwareness(2)
     except Exception:
         pass
-
-
-def _click_screen(x: int, y: int) -> None:
-    """Click a Windows screen coordinate in the same coordinate space as mss.
-
-    PyAutoGUI can apply its own DPI scaling on Windows. That can make a
-    coordinate that is correct in the screenshot land on the wrong physical
-    pixel. SetCursorPos/mouse_event use the Windows desktop coordinate space
-    directly, which matches the DPI-aware mss capture used by this watcher.
-    """
-    x = int(x)
-    y = int(y)
-
-    if platform.system() != "Windows":
-        pyautogui.click(x, y)
-        return
-
-    user32 = ctypes.windll.user32
-
-    # Move using Win32 rather than PyAutoGUI so there is no second DPI
-    # conversion between the Gemini screenshot and the physical mouse.
-    if not user32.SetCursorPos(x, y):
-        raise RuntimeError(f"SetCursorPos failed for ({x},{y})")
-
-    time.sleep(0.10)
-
-    # Confirm where Windows actually placed the cursor before sending the
-    # button press. This also makes debugging coordinate mismatches easier.
-    pt = ctypes.wintypes.POINT()
-    if user32.GetCursorPos(ctypes.byref(pt)):
-        actual_x, actual_y = int(pt.x), int(pt.y)
-        if abs(actual_x - x) > 2 or abs(actual_y - y) > 2:
-            raise RuntimeError(
-                f"Windows cursor landed at ({actual_x},{actual_y}) "
-                f"instead of ({x},{y})"
-            )
-
-    # Win32 mouse_event is intentionally used here because it sends a real
-    # left-button press/release to the desktop without PyAutoGUI's scaling.
-    MOUSEEVENTF_LEFTDOWN = 0x0002
-    MOUSEEVENTF_LEFTUP = 0x0004
-    user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-    time.sleep(0.05)
-    user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-
-
-
-def _ui_automation_call_button(action: str, player=None) -> tuple[bool, str]:
-    """Find and invoke a WhatsApp call button through Windows UI Automation.
-
-    This intentionally does NOT move the mouse. UIA's InvokePattern asks the
-    control itself to perform its action. We look for an Answer/Accept control
-    together with a Decline/Reject control in the same visible window, which is
-    a strong signal that the buttons belong to an incoming-call surface.
-    """
-    if platform.system() != "Windows":
-        return False, "Windows UI Automation is only available on Windows."
-
-    answer_words = {"answer", "accept", "answer call", "accept call"}
-    decline_words = {"decline", "reject", "decline call", "reject call"}
-
-    try:
-        from pywinauto import Desktop
-    except Exception as exc:
-        return False, f"pywinauto unavailable: {exc}"
-
-    def norm(value) -> str:
-        return " ".join(str(value or "").strip().lower().split())
-
-    def proc_name(window) -> str:
-        try:
-            import psutil
-            pid = int(window.element_info.process_id)
-            return psutil.Process(pid).name().lower()
-        except Exception:
-            return ""
-
-    try:
-        desktop = Desktop(backend="uia")
-        windows = desktop.windows(visible_only=True, enabled_only=True)
-
-        paired = []
-        all_target = []
-
-        for window in windows:
-            try:
-                buttons = window.descendants(control_type="Button")
-            except Exception:
-                continue
-
-            answer_buttons = []
-            decline_buttons = []
-
-            for button in buttons:
-                try:
-                    if not button.is_visible() or not button.is_enabled():
-                        continue
-
-                    name = norm(button.window_text() or button.element_info.name)
-                    if not name:
-                        continue
-
-                    if name in answer_words:
-                        answer_buttons.append(button)
-                    if name in decline_words:
-                        decline_buttons.append(button)
-                except Exception:
-                    continue
-
-            if answer_buttons and decline_buttons:
-                paired.append((window, answer_buttons, decline_buttons))
-            if answer_buttons or decline_buttons:
-                all_target.append((window, answer_buttons, decline_buttons))
-
-        candidates = paired or all_target
-
-        # Prefer a WhatsApp-owned surface when several windows expose generic
-        # button names such as "Accept".
-        whatsapp_candidates = [
-            item for item in candidates
-            if (
-                "whatsapp" in norm(item[0].window_text())
-                or "whatsapp" in proc_name(item[0])
-            )
-        ]
-        candidates = whatsapp_candidates or candidates
-
-        for window, answer_buttons, decline_buttons in candidates:
-            buttons = answer_buttons if action == "answer" else decline_buttons
-            if not buttons:
-                continue
-
-            try:
-                window_title = norm(window.window_text()) or "<untitled>"
-            except Exception:
-                window_title = "<untitled>"
-
-            for button in buttons:
-                try:
-                    name = norm(button.window_text() or button.element_info.name)
-
-                    try:
-                        window.set_focus()
-                    except Exception:
-                        pass
-
-                    # InvokePattern executes the button directly. It does not
-                    # call moveTo/click/click_input or otherwise move the mouse.
-                    try:
-                        button.invoke()
-                    except Exception:
-                        iface = getattr(button, "iface_invoke", None)
-                        if iface is None:
-                            raise
-                        iface.Invoke()
-
-                    msg = (
-                        f"UI Automation invoked WhatsApp {action} button "
-                        f"'{name}' in window '{window_title}'."
-                    )
-                    _log(player, f"[WhatsAppCall] {msg}")
-                    return True, msg
-                except Exception as exc:
-                    _log(
-                        player,
-                        f"[WhatsAppCall] UI Automation could not invoke "
-                        f"{action} button: {exc}"
-                    )
-
-        return False, f"No usable UI Automation {action} button was found."
-    except Exception as exc:
-        return False, f"Windows UI Automation scan failed: {exc}"
 
 
 def _capture_screen() -> tuple[bytes, float, float, int, int, Image.Image]:
@@ -600,16 +428,16 @@ class WhatsAppCallWatcher:
                     if end_center2 is None and ex is not None and ey is not None:
                         end_center2 = (ex, ey)
 
-                    if (
-                        state2 == "connected"
-                        and end_center2 is not None
-                    ):
-                        _log(self.player, "[WhatsAppCall] Visual detector found End Call. Ending the call.")
-                        click_x2 = origin_x2 + round(end_center2[0] * sx2)
-                        click_y2 = origin_y2 + round(end_center2[1] * sy2)
-                        _click_screen(click_x2, click_y2)
-                    elif state2 == "connected":
-                        _log(self.player, "[WhatsAppCall] Call is connected, but End Call was not visually clear.")
+                    if state2 == "connected":
+                        ok_end, end_details = _ui_automation_call_button("end", self.player)
+                        if ok_end:
+                            _log(self.player, "[WhatsAppCall] End Call invoked without mouse input.")
+                        else:
+                            _log(
+                                self.player,
+                                f"[WhatsAppCall] Connected call detected, but UI Automation "
+                                f"could not invoke End Call: {end_details}"
+                            )
                     else:
                         _log(self.player, "[WhatsAppCall] Call is no longer connected.")
 
