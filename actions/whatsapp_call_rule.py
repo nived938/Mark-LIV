@@ -13,8 +13,7 @@ The rule is process-local: it stays active until disabled or JARVIS exits.
 from __future__ import annotations
 
 import ctypes
-import io
-import json
+import ctypes
 import platform
 import threading
 import time
@@ -391,7 +390,7 @@ class WhatsAppCallWatcher:
                     time.sleep(4.5)
 
                     try:
-                        image_bytes2, sx2, sy2, origin_x2, origin_y2, _image2 = _capture_screen()
+                        image_bytes2, sx2, sy2, origin_x2, origin_y2, image2 = _capture_screen()
                         result2 = _vision(image_bytes2) or {}
                     except Exception as exc:
                         _log(self.player, f"[WhatsAppCall] Could not re-check the connected call: {exc}")
@@ -411,9 +410,9 @@ class WhatsAppCallWatcher:
                         and end_center2 is not None
                     ):
                         _log(self.player, "[WhatsAppCall] Visual detector found End Call. Ending the call.")
-                        click_x2 = origin_x2 + round(ex * sx2)
-                        click_y2 = origin_y2 + round(ey * sy2)
-                        pyautogui.click(click_x2, click_y2)
+                        click_x2 = origin_x2 + round(end_center2[0] * sx2)
+                        click_y2 = origin_y2 + round(end_center2[1] * sy2)
+                        _click_screen(click_x2, click_y2)
                     elif state2 == "connected":
                         _log(self.player, "[WhatsAppCall] Call is connected, but End Call was not visually clear.")
                     else:
@@ -468,6 +467,7 @@ def _one_shot_call_action(action: str, player=None) -> str:
         confidence = 0.0
 
     if state != "incoming" or confidence < _CONFIDENCE:
+        _log(player, f"[WhatsAppCall] Visual {action} rejected: state={state} confidence={confidence}")
         return "No active incoming WhatsApp call was visually confirmed."
 
     box_key = "answer_box" if action == "answer" else "decline_box"
