@@ -131,7 +131,7 @@ class WhatsAppIncomingAgent:
         self._thread.start()
         print(
             "[WhatsAppAgent] Incoming-call monitor started "
-            "(notification + UIA; visual controls require notification confirmation)."
+            "(notification + UIA + Win32 + visual detection)."
         )
 
     def stop(self) -> None:
@@ -167,11 +167,17 @@ class WhatsAppIncomingAgent:
             return False
         try:
             pid = int(control.process_id())
+        except Exception:
+            try:
+                pid = int(control.element_info.process_id)
+            except Exception:
+                return False
+
+        try:
             p = psutil.Process(pid)
-            blob = " ".join(
-                [p.name(), p.exe() or "", " ".join(p.cmdline())]
-            ).lower()
-            return "whatsapp" in blob
+            name = str(p.name() or "").lower()
+            exe = str(p.exe() or "").lower()
+            return "whatsapp" in name or "whatsapp" in exe
         except Exception:
             return False
 
@@ -344,10 +350,12 @@ class WhatsAppIncomingAgent:
 
                 _, a, d = best
                 self._visual_present = True
-                visual_signature = (round(a[2] / 40), round(a[3] / 40), round(d[2] / 40), round(d[3] / 40))
-                if visual_signature == self._last_visual_signature:
-                    return None
-                self._last_visual_signature = visual_signature
+                self._last_visual_signature = (
+                    round(a[2] / 40),
+                    round(a[3] / 40),
+                    round(d[2] / 40),
+                    round(d[3] / 40),
+                )
                 # Visual matching is intentionally silent here. A color pair
                 # on the desktop is only a supporting signal and is not itself
                 # considered an incoming call. Actual events are logged after
@@ -427,10 +435,9 @@ class WhatsAppIncomingAgent:
                 if not pid_value:
                     return True
                 proc = psutil.Process(pid_value)
-                blob = " ".join(
-                    [proc.name(), proc.exe() or "", " ".join(proc.cmdline())]
-                ).lower()
-                if "whatsapp" not in blob:
+                name = str(proc.name() or "").lower()
+                exe = str(proc.exe() or "").lower()
+                if "whatsapp" not in name and "whatsapp" not in exe:
                     return True
 
                 length = user32.GetWindowTextLengthW(hwnd)
@@ -554,33 +561,70 @@ class WhatsAppIncomingAgent:
 
         # Detector 3a: UI Automation.
         for window in self._find_whatsapp_windows():
-            accept, decline = self._find_buttons(window)
-            if accept is None or decline is None:
-                continue
             if not self._looks_like_whatsapp(window):
                 continue
-            detected_caller = self._extract_caller(window)
-            if self._norm(detected_caller) not in {"someone", "non client input sink window"}:
-                caller = caller or detected_caller
-            sources.append("uia")
-            return IncomingCall(
-                caller=caller or "someone",
-                window=window,
-                accept_control=accept,
-                decline_control=decline,
-                detected_at=time.time(),
-                detection_sources=tuple(dict.fromkeys(sources)),
-            )
+
+            accept, decline = self._find_buttons(window)
+            if accept is not None and decline is not None:
+                detected_caller = self._extract_caller(window)
+                if self._norm(detected_caller) not in {"someone", "non client input sink window"}:
+                    caller = caller or detected_caller
+                sources.append("uia")
+                return IncomingCall(
+                    caller=caller or "someone",
+                    window=window,
+                    accept_control=accept,
+                    decline_control=decline,
+                    detected_at=time.time(),
+                    detection_sources=tuple(dict.fromkeys(sources)),
+                )
+
+            # Some WhatsApp builds expose the call text but not the buttons.
+            # This is enough to identify the correct window for Tab navigation.
+            try:
+                texts = [self._safe_text(window)]
+                texts.extend(self._safe_text(control) for control in window.descendants())
+                blob = self._norm(" ".join(x for x in texts if x))
+                if "incoming call" in blob or "is calling" in blob or "calling you" in blob:
+                    detected_caller = self._extract_caller(window)
+                    if self._norm(detected_caller) not in {"someone", "non client input sink window"}:
+                        caller = caller or detected_caller
+                    sources.append("uia-text")
+                    return IncomingCall(
+                        caller=caller or "someone",
+                        window=window,
+                        accept_control=None,
+                        decline_control=None,
+                        detected_at=time.time(),
+                        detection_sources=tuple(dict.fromkeys(sources)),
+                    )
+            except Exception:
+                pass
 
         # Detector 3b: Win32 confirms WhatsApp is creating native windows.
         win32 = self._win32_whatsapp_windows()
         if win32:
             sources.append("win32")
 
-        # Detector 2: visual controls. This is intentionally independent of
-        # WhatsApp's accessibility tree.
+        # Detector 2: visual controls.
         points = self._visual_call_controls()
-        if points and ("notification" in sources or "win32" in sources):
+        if points and ("notification" in sources or "win32" in sources or "uia-text" in sources):
+            accept_point, decline_point = points
+            sources.append("vision")
+            notification_text = notification[1] if notification else ""
+            return IncomingCall(
+                caller=caller or self._caller_from_text(notification_text) or "unknown caller",
+                window=None,
+                accept_control=None,
+                decline_control=None,
+                detected_at=time.time(),
+                accept_point=accept_point,
+                decline_point=decline_point,
+                detection_sources=tuple(dict.fromkeys(sources)),
+            )
+
+        # Pure visual fallback: a tight green/red pair is a call signature.
+        if points:
             accept_point, decline_point = points
             sources.append("vision")
             notification_text = notification[1] if notification else ""
