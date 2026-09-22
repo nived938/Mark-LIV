@@ -13,6 +13,7 @@ The rule is process-local: it stays active until disabled or JARVIS exits.
 from __future__ import annotations
 
 import ctypes
+import ctypes.wintypes
 import platform
 import threading
 import time
@@ -54,10 +55,47 @@ def _make_dpi_aware() -> None:
 
 
 def _click_screen(x: int, y: int) -> None:
-    """Move to a visually detected target before clicking it."""
-    pyautogui.moveTo(int(x), int(y), duration=0.08)
-    time.sleep(0.06)
-    pyautogui.click(int(x), int(y))
+    """Click a Windows screen coordinate in the same coordinate space as mss.
+
+    PyAutoGUI can apply its own DPI scaling on Windows. That can make a
+    coordinate that is correct in the screenshot land on the wrong physical
+    pixel. SetCursorPos/mouse_event use the Windows desktop coordinate space
+    directly, which matches the DPI-aware mss capture used by this watcher.
+    """
+    x = int(x)
+    y = int(y)
+
+    if platform.system() != "Windows":
+        pyautogui.click(x, y)
+        return
+
+    user32 = ctypes.windll.user32
+
+    # Move using Win32 rather than PyAutoGUI so there is no second DPI
+    # conversion between the Gemini screenshot and the physical mouse.
+    if not user32.SetCursorPos(x, y):
+        raise RuntimeError(f"SetCursorPos failed for ({x},{y})")
+
+    time.sleep(0.10)
+
+    # Confirm where Windows actually placed the cursor before sending the
+    # button press. This also makes debugging coordinate mismatches easier.
+    pt = ctypes.wintypes.POINT()
+    if user32.GetCursorPos(ctypes.byref(pt)):
+        actual_x, actual_y = int(pt.x), int(pt.y)
+        if abs(actual_x - x) > 2 or abs(actual_y - y) > 2:
+            raise RuntimeError(
+                f"Windows cursor landed at ({actual_x},{actual_y}) "
+                f"instead of ({x},{y})"
+            )
+
+    # Win32 mouse_event is intentionally used here because it sends a real
+    # left-button press/release to the desktop without PyAutoGUI's scaling.
+    MOUSEEVENTF_LEFTDOWN = 0x0002
+    MOUSEEVENTF_LEFTUP = 0x0004
+    user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+    time.sleep(0.05)
+    user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
 
 
 def _capture_screen() -> tuple[bytes, float, float, int, int, Image.Image]:
@@ -349,10 +387,87 @@ class WhatsAppCallWatcher:
                         self.player,
                         f"[WhatsAppCall] Visual Answer target: ({click_x},{click_y}). Answering."
                     )
-                    _click_screen(click_x, click_y)
+
+                    # Do not trust a single mouse event. WhatsApp may animate
+                    # the call card while the button is moving. Re-capture and
+                    # re-detect once after the first click, with one controlled
+                    # retry at the newly detected Answer position.
+                    accepted = False
+                    for attempt in range(2):
+                        try:
+                            _click_screen(click_x, click_y)
+                        except Exception as exc:
+                            _log(
+                                self.player,
+                                f"[WhatsAppCall] Windows click failed on attempt {attempt + 1}: {exc}"
+                            )
+                            break
+
+                        time.sleep(0.85)
+
+                        try:
+                            verify_bytes, vsx, vsy, vorigin_x, vorigin_y, verify_image = _capture_screen()
+                            verify = _vision(verify_bytes) or {}
+                        except Exception as exc:
+                            _log(
+                                self.player,
+                                f"[WhatsAppCall] Could not verify the Answer click: {exc}"
+                            )
+                            verify = {}
+
+                        verify_state = str(verify.get("state") or "none").strip().lower()
+                        try:
+                            verify_conf = float(verify.get("confidence") or 0.0)
+                        except Exception:
+                            verify_conf = 0.0
+
+                        _log(
+                            self.player,
+                            f"[WhatsAppCall] After Answer click: state={verify_state} confidence={verify_conf}"
+                        )
+
+                        # Connected means the answer definitely took effect.
+                        if verify_state == "connected" and verify_conf >= _CONFIDENCE:
+                            accepted = True
+                            break
+
+                        # The call may still be ringing because the first click
+                        # missed. Re-detect the current Answer button and retry
+                        # exactly once at the fresh location.
+                        if attempt == 0 and verify_state == "incoming" and verify_conf >= _CONFIDENCE:
+                            fresh_box = _valid_box(
+                                _box(verify.get("answer_box")),
+                                verify_image.width,
+                                verify_image.height,
+                            )
+                            fresh_center = _center(fresh_box)
+
+                            if fresh_center is None:
+                                fresh_x = _coord(verify.get("answer_x"))
+                                fresh_y = _coord(verify.get("answer_y"))
+                                if fresh_x is not None and fresh_y is not None:
+                                    fresh_center = (fresh_x, fresh_y)
+
+                            if fresh_center is not None:
+                                click_x = vorigin_x + round(fresh_center[0] * vsx)
+                                click_y = vorigin_y + round(fresh_center[1] * vsy)
+                                _log(
+                                    self.player,
+                                    f"[WhatsAppCall] Answer still visible. Retrying at fresh target: ({click_x},{click_y})."
+                                )
+                                continue
+
+                        break
+
+                    if not accepted:
+                        _log(
+                            self.player,
+                            "[WhatsAppCall] Answer click could not be visually verified; leaving watcher armed."
+                        )
+                        continue
+
                     self._owned_call = True
                     self._message_sent = False
-                    time.sleep(1.0)
                     continue
 
                 if self._owned_call and state == "connected" and not self._message_sent:
@@ -488,7 +603,11 @@ def _one_shot_call_action(action: str, player=None) -> str:
     click_y = origin_y + round(center[1] * sy)
 
     _log(player, f"[WhatsAppCall] Visual {action} target: ({click_x},{click_y})")
-    _click_screen(click_x, click_y)
+    try:
+        _click_screen(click_x, click_y)
+    except Exception as exc:
+        _log(player, f"[WhatsAppCall] Windows {action} click failed: {exc}")
+        return f"Found the WhatsApp {action} button, but Windows rejected the click: {exc}"
     return f"Visually located and clicked WhatsApp {action}."
 
 
