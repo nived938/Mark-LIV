@@ -407,23 +407,32 @@ Engineered by a developer building a real-world JARVIS-style assistant.
 | Instagram | [@fatihmakes](https://www.instagram.com/fatihmakes) |
 
 
-## WhatsApp call auto-reply
+## WhatsApp Desktop calls
 
-JARVIS can arm a temporary rule from a voice command such as:
+JARVIS includes the dedicated incoming-call architecture used by the advanced WhatsApp integration:
+
+- `actions/whatsapp_incoming_agent.py` runs continuously on Windows and combines Windows notifications, UI Automation/Win32 inspection, and visual detection of the incoming red/green call controls.
+- `actions/whatsapp_advance.py` provides WhatsApp Desktop commands for opening WhatsApp, sending messages, voice/video calls, and controlling a pending incoming call.
+- `actions/whatsapp_call_rule.py` provides the automatic reply rule.
+
+Incoming call controls intentionally use keyboard navigation instead of the mouse:
+
+- **Accept:** focus the WhatsApp call window → `Tab` × 3 → `Enter`
+- **Decline:** focus the WhatsApp call window → `Tab` × 4 → `Enter`
+
+For example:
 
 `If anyone calls me, tell them I am not available right now.`
 
-While the rule is active, JARVIS watches the Windows desktop and uses Gemini vision to identify an actual incoming WhatsApp Desktop voice/video call. It visually finds the Answer button, answers the call, speaks the configured sentence, then visually finds and presses the End call button.
+When that rule is enabled, JARVIS detects the incoming WhatsApp Desktop call, focuses the call surface, answers it with the keyboard sequence above, speaks the configured sentence, and then attempts to end the connected call through Windows UI Automation.
 
-The rule is process-local. It stays active until you say to stop automatic WhatsApp call answering or until JARVIS exits.
-
-This automation applies to **WhatsApp Desktop on the JARVIS PC**. WhatsApp must be open, signed in, and able to show the incoming call window on the desktop. JARVIS does not answer the native cellular call UI on the phone itself.
+This automation applies to **WhatsApp Desktop on the JARVIS PC**. WhatsApp must be installed, signed in, and able to receive calls on the Windows desktop. It does not control the phone's native cellular-call interface.
 
 ### Caller audio routing
 
-JARVIS's normal speech playback is not automatically a Windows microphone device. For the caller to hear JARVIS clearly, WhatsApp needs a microphone route that receives the JARVIS output.
+JARVIS's speech output is separate from WhatsApp's microphone input. For the caller to hear JARVIS, WhatsApp needs its microphone routed to the JARVIS audio output. A virtual audio device such as VB-CABLE or VoiceMeeter can provide that route.
 
-The auto-reply feature looks for a dedicated virtual audio output such as **VB-CABLE Input**, **VoiceMeeter Input**, or another configured endpoint. Set the matching virtual output/input pair in WhatsApp and, when needed, put the endpoint name in `config/api_keys.json`:
+The project does not install a virtual audio driver. When a dedicated route is configured, the optional `whatsapp_call_audio_device` setting in `config/api_keys.json` can select it, for example:
 
 ```json
 {
@@ -432,5 +441,3 @@ The auto-reply feature looks for a dedicated virtual audio output such as **VB-C
     "whatsapp_call_audio_device": "CABLE Input"
 }
 ```
-
-The project does not install a virtual audio driver. When no dedicated route is available, JARVIS still answers and speaks through its normal speaker path, but whether the caller hears that audio depends on the microphone/audio setup of the PC.
