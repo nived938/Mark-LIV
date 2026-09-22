@@ -405,3 +405,31 @@ Engineered by a developer building a real-world JARVIS-style assistant.
 | --- | --- |
 | YouTube | [@FatihMakes](https://www.youtube.com/@FatihMakes) |
 | Instagram | [@fatihmakes](https://www.instagram.com/fatihmakes) |
+
+## HUD map
+
+JARVIS can open a requested place directly inside the center HUD. For example:
+
+`look at Kasaragod`  
+`show Kasaragod on the map`  
+`open the map for London`
+
+The default implementation uses Google's official Maps URLs, which do not require a Google Maps API key. The map is embedded in the desktop HUD with Qt WebEngine. Google documents Maps URLs as a free, keyless way to launch searches and map views.
+
+### Optional Google Cloud setup
+
+A Google Cloud project is **not required** for the default map mode.
+
+For a dedicated Maps Embed API integration, create a Google Cloud project with the human-readable name **Jarvis**, enable the **Maps Embed API**, create an API key, and restrict that key to the Maps Embed API. Google currently documents Maps Embed API requests as available at no charge, but a billing account is still required for the project.
+
+Add the key to your local `config/api_keys.json`:
+
+```json
+{
+  "google_maps_api_key": "YOUR_KEY"
+}
+```
+
+Do not commit that file. It is local configuration.
+
+The map dependency is `PyQt6-WebEngine`, which provides the embedded Chromium-based web view used by the HUD.
