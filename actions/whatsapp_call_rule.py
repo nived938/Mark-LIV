@@ -4,8 +4,9 @@ The rule is armed by a normal JARVIS command such as:
     "If anyone calls me, tell them I am not available right now."
 
 While armed, a daemon thread watches the Windows desktop. It uses Gemini vision
-to identify a WhatsApp call surface, then uses Windows UI Automation to invoke
-the Answer/Decline/End controls directly without moving or clicking the mouse.
+to identify a WhatsApp call surface. For incoming calls it focuses the WhatsApp
+call window and uses keyboard navigation: Tab three times + Enter to Answer, or
+Tab four times + Enter to Decline. No mouse input is used.
 
 The rule is process-local: it stays active until disabled or JARVIS exits.
 """
@@ -51,6 +52,196 @@ def _make_dpi_aware() -> None:
         shcore.SetProcessDpiAwareness(2)
     except Exception:
         pass
+
+
+
+def _find_and_focus_whatsapp_window(player=None):
+    """Find a visible WhatsApp top-level window and focus it without mouse input."""
+    if platform.system() != "Windows":
+        return None
+
+    try:
+        from pywinauto import Desktop
+        import psutil
+
+        desktop = Desktop(backend="uia")
+        windows = desktop.windows(visible_only=True, enabled_only=True)
+
+        candidates = []
+        for window in windows:
+            try:
+                hwnd = int(window.handle)
+                title = " ".join(str(window.window_text() or "").split())
+                pid = int(window.element_info.process_id)
+
+                try:
+                    process_name = psutil.Process(pid).name().lower()
+                except Exception:
+                    process_name = ""
+
+                blob = f"{title} {process_name}".lower()
+                if "whatsapp" not in blob:
+                    continue
+
+                rect = window.rectangle()
+                width = max(0, int(rect.right - rect.left))
+                height = max(0, int(rect.bottom - rect.top))
+                area = width * height
+
+                candidates.append((window, hwnd, title, process_name, area))
+            except Exception:
+                continue
+
+        if not candidates:
+            return None
+
+        # An incoming-call popup is normally the active/smaller WhatsApp
+        # surface. Prefer the current foreground WhatsApp window; otherwise
+        # prefer the smallest visible WhatsApp surface, which avoids selecting
+        # a large main chat window when the call popup is separate.
+        user32 = ctypes.windll.user32
+        foreground = int(user32.GetForegroundWindow() or 0)
+
+        chosen = next((item for item in candidates if item[1] == foreground), None)
+        if chosen is None:
+            chosen = min(candidates, key=lambda item: item[4] if item[4] > 0 else 10**18)
+
+        window, hwnd, title, process_name, _ = chosen
+
+        try:
+            window.restore()
+        except Exception:
+            pass
+
+        try:
+            window.set_focus()
+        except Exception:
+            try:
+                user32.SetForegroundWindow(hwnd)
+            except Exception:
+                pass
+
+        time.sleep(0.25)
+
+        try:
+            actual = int(user32.GetForegroundWindow() or 0)
+            if actual != hwnd:
+                _log(
+                    player,
+                    f"[WhatsAppCall] Could not make WhatsApp window '{title or process_name}' foreground."
+                )
+                return None
+        except Exception:
+            pass
+
+        _log(
+            player,
+            f"[WhatsAppCall] Focused WhatsApp window '{title or process_name}' for keyboard call control."
+        )
+        return window
+    except Exception as exc:
+        _log(player, f"[WhatsAppCall] Could not focus WhatsApp window: {exc}")
+        return None
+
+
+def _keyboard_call_action(action: str, player=None) -> tuple[bool, str]:
+    """Answer/decline the focused WhatsApp call using only Tab and Enter."""
+    if action not in {"answer", "decline"}:
+        return False, f"Unsupported keyboard call action: {action}"
+
+    window = _find_and_focus_whatsapp_window(player)
+    if window is None:
+        return False, "No visible WhatsApp window could be focused."
+
+    tabs = 3 if action == "answer" else 4
+
+    try:
+        # Keyboard-only control. No cursor movement and no mouse click.
+        for _ in range(tabs):
+            pyautogui.press("tab")
+            time.sleep(0.12)
+
+        pyautogui.press("enter")
+        time.sleep(0.20)
+
+        label = "Accept/Answer" if action == "answer" else "Decline/Reject"
+        details = f"Pressed Tab {tabs} times and Enter for WhatsApp {label}."
+        _log(self_player if False else player, f"[WhatsAppCall] {details}")
+        return True, details
+    except Exception as exc:
+        return False, f"Keyboard {action} control failed: {exc}"
+
+
+def _ui_automation_end_button(player=None) -> tuple[bool, str]:
+    """Invoke the connected-call End/Hang-up control without mouse input."""
+    if platform.system() != "Windows":
+        return False, "Windows UI Automation is only available on Windows."
+
+    try:
+        from pywinauto import Desktop
+    except Exception as exc:
+        return False, f"pywinauto unavailable: {exc}"
+
+    words = {"end", "end call", "hang up", "hangup", "disconnect", "leave call"}
+
+    try:
+        desktop = Desktop(backend="uia")
+        windows = desktop.windows(visible_only=True, enabled_only=True)
+        candidates = []
+
+        for window in windows:
+            try:
+                title = " ".join(str(window.window_text() or "").split()).lower()
+                process_name = ""
+                try:
+                    import psutil
+                    process_name = psutil.Process(int(window.element_info.process_id)).name().lower()
+                except Exception:
+                    pass
+
+                blob_window = f"{title} {process_name}"
+                if "whatsapp" not in blob_window:
+                    continue
+
+                for button in window.descendants(control_type="Button"):
+                    try:
+                        if not button.is_visible() or not button.is_enabled():
+                            continue
+                        names = [
+                            str(button.window_text() or "").strip().lower(),
+                            str(button.element_info.name or "").strip().lower(),
+                            str(button.element_info.class_name or "").strip().lower(),
+                            str(button.element_info.automation_id or "").strip().lower(),
+                        ]
+                        blob = " ".join(v for v in names if v)
+                        if any(word in blob for word in words):
+                            candidates.append((window, button))
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+
+        for window, button in candidates:
+            try:
+                window.set_focus()
+            except Exception:
+                pass
+            try:
+                button.invoke()
+            except Exception:
+                iface = getattr(button, "iface_invoke", None)
+                if iface is None:
+                    continue
+                iface.Invoke()
+
+            name = str(button.window_text() or button.element_info.name or "End")
+            msg = f"UI Automation invoked WhatsApp End button '{name}' without mouse input."
+            _log(player, f"[WhatsAppCall] {msg}")
+            return True, msg
+
+        return False, "No accessible WhatsApp End/Hang-up button was found."
+    except Exception as exc:
+        return False, f"End-call UI Automation scan failed: {exc}"
 
 
 def _capture_screen() -> tuple[bytes, float, float, int, int, Image.Image]:
@@ -332,15 +523,15 @@ class WhatsAppCallWatcher:
                 )
 
                 if state == "incoming" and not self._owned_call:
-                    # Vision identifies the incoming call; Windows UI
-                    # Automation performs the actual Answer action without
-                    # touching the physical mouse.
-                    ok, details = _ui_automation_call_button("answer", self.player)
+                    # The visual detector confirms the incoming WhatsApp call.
+                    # The actual Answer action is deliberately keyboard-only:
+                    # focus the WhatsApp call surface -> Tab x3 -> Enter.
+                    ok, details = _keyboard_call_action("answer", self.player)
                     if not ok:
                         _log(
                             self.player,
                             f"[WhatsAppCall] Incoming call detected visually, "
-                            f"but UI Automation could not invoke Answer: {details}"
+                            f"but keyboard Answer failed: {details}"
                         )
                         continue
 
@@ -352,7 +543,7 @@ class WhatsAppCallWatcher:
                     except Exception as exc:
                         _log(
                             self.player,
-                            f"[WhatsAppCall] Could not verify the UI Automation Answer action: {exc}"
+                            f"[WhatsAppCall] Could not verify the keyboard Answer action: {exc}"
                         )
                         verify = {}
 
@@ -364,13 +555,13 @@ class WhatsAppCallWatcher:
 
                     _log(
                         self.player,
-                        f"[WhatsAppCall] After UI Automation Answer: state={verify_state} confidence={verify_conf}"
+                        f"[WhatsAppCall] After Tab x3 + Enter: state={verify_state} confidence={verify_conf}"
                     )
 
                     if verify_state != "connected" or verify_conf < _CONFIDENCE:
                         _log(
                             self.player,
-                            "[WhatsAppCall] Answer was invoked but the connected state "
+                            "[WhatsAppCall] Tab x3 + Enter was sent but the connected state "
                             "was not visually confirmed; leaving watcher armed."
                         )
                         continue
@@ -429,14 +620,14 @@ class WhatsAppCallWatcher:
                         end_center2 = (ex, ey)
 
                     if state2 == "connected":
-                        ok_end, end_details = _ui_automation_call_button("end", self.player)
+                        ok_end, end_details = _ui_automation_end_button(self.player)
                         if ok_end:
                             _log(self.player, "[WhatsAppCall] End Call invoked without mouse input.")
                         else:
                             _log(
                                 self.player,
-                                f"[WhatsAppCall] Connected call detected, but UI Automation "
-                                f"could not invoke End Call: {end_details}"
+                                f"[WhatsAppCall] Connected call detected, but End Call "
+                                f"could not be invoked: {end_details}"
                             )
                     else:
                         _log(self.player, "[WhatsAppCall] Call is no longer connected.")
@@ -493,13 +684,13 @@ def _one_shot_call_action(action: str, player=None) -> str:
         _log(player, f"[WhatsAppCall] Visual {action} rejected: state={state} confidence={confidence}")
         return "No active incoming WhatsApp call was visually confirmed."
 
-    ok, details = _ui_automation_call_button(action, player)
+    ok, details = _keyboard_call_action(action, player)
     if ok:
         return details
 
     return (
-        f"Visually confirmed the incoming WhatsApp call, but Windows UI "
-        f"Automation could not invoke {action}: {details}"
+        f"Visually confirmed the incoming WhatsApp call, but keyboard "
+        f"control could not invoke {action}: {details}"
     )
 
 
