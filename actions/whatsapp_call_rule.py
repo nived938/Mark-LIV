@@ -18,14 +18,15 @@ import platform
 import threading
 import time
 
-from PIL import Image
+from PIL import Image, ImageChops
 import pyautogui
 import mss
 
 
 _DEFAULT_MESSAGE = "Nived is not available right now."
-_POLL_SECONDS = 0.6
-_VISION_COOLDOWN = 0.9
+_POLL_SECONDS = 0.65
+_VISION_COOLDOWN = 1.0
+_MIN_CHANGE = 0.7
 _CONFIDENCE = 0.72
 
 
@@ -36,7 +37,7 @@ def _log(player, message: str) -> None:
         print(f"[WhatsAppCall] {message}")
 
 
-def _capture_screen() -> tuple[bytes, float, float, int, int]:
+def _capture_screen() -> tuple[bytes, float, float, int, int, Image.Image]:
     """Capture the complete Windows virtual desktop, including all monitors."""
     with mss.mss() as sct:
         desktop = sct.monitors[0]  # [0] is the bounding rectangle of all monitors.
@@ -69,7 +70,24 @@ def _capture_screen() -> tuple[bytes, float, float, int, int]:
         full_h / img.height,
         origin_x,
         origin_y,
+        img,
     )
+
+
+def _changed(previous: Image.Image | None, current: Image.Image) -> bool:
+    """Return True when enough of the desktop changed to justify a Gemini vision call."""
+    if previous is None:
+        return True
+
+    a = previous.resize((64, 36), Image.Resampling.BILINEAR).convert("L")
+    b = current.resize((64, 36), Image.Resampling.BILINEAR).convert("L")
+    diff = ImageChops.difference(a, b)
+
+    # A small incoming-call popup occupies enough of the desktop to cross this
+    # threshold, while ordinary cursor motion and tiny UI animation normally do
+    # not. The detector still sees the complete desktop when it does run.
+    mean = sum(diff.getdata()) / (64 * 36)
+    return mean >= _MIN_CHANGE
 
 
 def _vision(image_bytes: bytes) -> dict | None:
@@ -199,19 +217,28 @@ class WhatsAppCallWatcher:
                 return
 
             last_vision = 0.0
+            previous_image = None
 
             while not self._stop.wait(_POLL_SECONDS):
                 try:
-                    image_bytes, sx, sy, origin_x, origin_y = _capture_screen()
+                    image_bytes, sx, sy, origin_x, origin_y, image = _capture_screen()
                 except Exception as exc:
                     _log(self.player, f"[WhatsAppCall] Screen capture failed: {exc}")
                     continue
 
                 now = time.monotonic()
+                changed = _changed(previous_image, image)
+                previous_image = image
+
+                # This is intentionally visual-only. There is no window-title
+                # gate, WhatsApp-process check, OCR shortcut, or fixed coordinate.
+                # Gemini receives the real desktop image whenever the desktop
+                # changes enough to warrant a visual inspection.
+                if not changed:
+                    continue
                 if now - last_vision < _VISION_COOLDOWN:
                     continue
 
-                # This is intentionally visual-only. There is no title check,
                 # window check, OCR shortcut, or fixed WhatsApp coordinate.
                 result = _vision(image_bytes)
                 last_vision = now
@@ -292,7 +319,7 @@ class WhatsAppCallWatcher:
                     time.sleep(4.5)
 
                     try:
-                        image_bytes2, sx2, sy2, origin_x2, origin_y2 = _capture_screen()
+                        image_bytes2, sx2, sy2, origin_x2, origin_y2, _image2 = _capture_screen()
                         result2 = _vision(image_bytes2) or {}
                     except Exception as exc:
                         _log(self.player, f"[WhatsAppCall] Could not re-check the connected call: {exc}")
