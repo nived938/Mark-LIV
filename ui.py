@@ -20,20 +20,13 @@ else:
 
 from PyQt6.QtCore import (
     QEasingCurve, QLineF, QMimeData, QObject, QParallelAnimationGroup, QPointF,
-    QPropertyAnimation, QRect, QRectF, QSize, Qt, QTimer, QUrl, pyqtSignal,
+    QPropertyAnimation, QRect, QRectF, QSize, Qt, QTimer, pyqtSignal,
 )
 from PyQt6.QtGui import (
     QBrush, QColor, QConicalGradient, QDragEnterEvent, QDropEvent, QFont,
     QFontDatabase, QKeySequence, QLinearGradient, QPainter, QPainterPath,
     QPen, QPixmap, QRadialGradient, QShortcut,
 )
-try:
-    from PyQt6.QtWebEngineWidgets import QWebEngineView
-    _WEBENGINE_AVAILABLE = True
-except Exception:
-    QWebEngineView = None
-    _WEBENGINE_AVAILABLE = False
-
 from PyQt6.QtWidgets import (
     QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QPushButton, QScrollArea, QSizePolicy, QSplitter,
@@ -2923,165 +2916,6 @@ class RemoteKeyOverlay(QWidget):
         self.closed.emit()
 
 
-class MapPanel(QWidget):
-    """Full-bleed Google Maps JavaScript API canvas inside the HUD."""
-
-    closed = pyqtSignal()
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setStyleSheet(f"background: {C.BG}; border: none;")
-        self._location = ""
-        self._api_key = ""
-        self._view = None
-
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(0)
-
-        # The map itself fills the HUD. Only a tiny JARVIS close control is
-        # drawn over it, so there is no Google Maps webpage chrome.
-        self._close_btn = QPushButton("✕")
-        self._close_btn.setFixedSize(34, 34)
-        self._close_btn.setFont(QFont("Courier New", 10, QFont.Weight.Bold))
-        self._close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._close_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: rgba(0, 6, 10, 210);
-                color: {C.TEXT_MED};
-                border: 1px solid {C.BORDER_B};
-                border-radius: 4px;
-                padding: 0;
-            }}
-            QPushButton:hover {{
-                color: {C.PRI};
-                border-color: {C.PRI};
-                background: rgba(0, 21, 32, 225);
-            }}
-        """)
-        self._close_btn.clicked.connect(self.closed.emit)
-
-        if QWebEngineView is None:
-            missing = QLabel(
-                "GOOGLE MAP ENGINE UNAVAILABLE\n\n"
-                "Install the HUD map dependency with:\n"
-                "python -m pip install PyQt6-WebEngine"
-            )
-            missing.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            missing.setFont(QFont("Courier New", 9))
-            missing.setStyleSheet(f"color: {C.TEXT_MED}; background: {C.PANEL};")
-            lay.addWidget(missing, stretch=1)
-            self._view = None
-        else:
-            self._view = QWebEngineView()
-            self._view.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
-            self._view.setStyleSheet(f"background: {C.BG}; border: none;")
-            self._view.loadFinished.connect(self._on_load_finished)
-            lay.addWidget(self._view, stretch=1)
-
-        self._close_btn.setParent(self)
-        self._close_btn.raise_()
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        if self._close_btn is not None:
-            self._close_btn.move(max(8, self.width() - 46), 12)
-            self._close_btn.raise_()
-
-    @staticmethod
-    def _html(api_key: str, location: str) -> str:
-        import json as _json
-
-        key_js = _json.dumps(api_key)
-        location_js = _json.dumps(location)
-
-        return f"""<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<style>
-html,body,#map{{width:100%;height:100%;margin:0;padding:0;overflow:hidden;background:#00060a;}}
-</style>
-</head>
-<body>
-<div id="map"></div>
-<script>
-let map;
-let geocoder;
-
-async function initMap() {{
-  try {{
-    const {{ Map }} = await google.maps.importLibrary("maps");
-    const {{ Geocoder }} = await google.maps.importLibrary("geocoding");
-
-    map = new Map(document.getElementById("map"), {{
-      center: {{lat: 12.4984, lng: 74.9869}},
-      zoom: 11,
-      mapTypeId: "roadmap",
-      disableDefaultUI: true,
-      keyboardShortcuts: false,
-      gestureHandling: "greedy",
-      clickableIcons: false,
-      streetViewControl: false,
-      fullscreenControl: false,
-      mapTypeControl: false,
-      rotateControl: false,
-      scaleControl: false,
-      zoomControl: false
-    }});
-
-    geocoder = new Geocoder();
-    const response = await geocoder.geocode({{address: {location_js}}});
-    if (response.results && response.results.length) {{
-      const result = response.results[0];
-      map.setCenter(result.geometry.location);
-      if (result.geometry.viewport) {{
-        map.fitBounds(result.geometry.viewport);
-        const z = map.getZoom() || 11;
-        map.setZoom(Math.min(15, Math.max(10, z)));
-      }}
-    }}
-  }} catch (err) {{
-    console.error("JARVIS map error:", err);
-  }}
-}}
-</script>
-<script async src="https://maps.googleapis.com/maps/api/js?key={api_key}&v=weekly&callback=initMap"></script>
-</body>
-</html>"""
-
-    def show_location(self, location: str, api_key: str = "") -> None:
-        location = " ".join(str(location or "").split()).strip()
-        if not location:
-            return
-
-        self._location = location
-        self._api_key = str(api_key or "").strip()
-
-        if self._view is None:
-            return
-
-        if not self._api_key:
-            self._view.setHtml(
-                "<body style='background:#00060a;color:#5ab8cc;font-family:monospace;"
-                "display:grid;place-items:center;height:100%;text-align:center;'>"
-                "GOOGLE MAPS API KEY REQUIRED<br><br>"
-                "Add google_maps_api_key to config/api_keys.json"
-                "</body>"
-            )
-            return
-
-        self._view.setHtml(
-            self._html(self._api_key, location),
-            QUrl("https://maps.googleapis.com/")
-        )
-
-    def _on_load_finished(self, ok: bool) -> None:
-        if not ok:
-            # Never fall back to google.com/maps. The HUD must stay map-only.
-            pass
-
 
 class MainWindow(QMainWindow):
     _log_sig        = pyqtSignal(str)
@@ -3090,8 +2924,6 @@ class MainWindow(QMainWindow):
     _reconfig_sig   = pyqtSignal()           # trigger setup overlay from any thread
     _camera_sig     = pyqtSignal(bytes)      # show camera frame preview (small overlay)
     _cam_stream_sig = pyqtSignal(bool)       # True=start live stream, False=stop
-    _map_sig        = pyqtSignal(str)       # open requested location in HUD map
-    _map_close_sig  = pyqtSignal()       # close map on the Qt main thread
     _cam_frame_sig  = pyqtSignal(bytes)      # live camera frame → HUD area
     _clipboard_sig  = pyqtSignal(str)        # clipboard text changed (thread-safe)
     _confirm_sig    = pyqtSignal(str, str)   # (title, detail) — irreversible-action gate
@@ -3204,10 +3036,6 @@ class MainWindow(QMainWindow):
         self._hud_cam_stack.addWidget(self.hud)
         self._hud_cam_stack.addWidget(_cam_cont)
 
-        # HUD map surface, index 2. It replaces the animated head while open.
-        self._map_panel = MapPanel()
-        self._map_panel.closed.connect(self.close_map)
-        self._hud_cam_stack.addWidget(self._map_panel)
 
         self._center_split = QSplitter(Qt.Orientation.Vertical)
         self._center_split.setStyleSheet(f"""
@@ -3259,8 +3087,6 @@ class MainWindow(QMainWindow):
         self._confirm_hide_sig.connect(self._hide_confirm_banner)
         self._cam_stream_sig.connect(self._on_cam_stream)
         self._cam_frame_sig.connect(self._on_cam_frame)
-        self._map_sig.connect(self._on_map)
-        self._map_close_sig.connect(self.close_map)
         self._clipboard_sig.connect(self._show_clipboard_panel)
         self._wake_dl_sig.connect(self._on_wake_install_done)
         self._quiz_sig.connect(self._show_quiz)
@@ -3307,21 +3133,6 @@ class MainWindow(QMainWindow):
         else:
             self._hud_cam_stack.setCurrentIndex(0)
             self._cam_live_lbl.clear()
-
-    def _on_map(self, location: str) -> None:
-        """Slot on Qt main thread: display a requested location in the HUD."""
-        cfg = _read_full_config()
-        api_key = (cfg.get("google_maps_api_key") or "").strip()
-        self._map_panel.show_location(location, api_key)
-        self._hud_cam_stack.setCurrentIndex(2)
-        self._content_panel.hide()
-        self._quiz_panel.hide()
-        self._log.append_log(f"SYS: Map opened — {location}")
-
-    def close_map(self) -> None:
-        """Return the center surface from the map to the animated HUD."""
-        self._hud_cam_stack.setCurrentIndex(0)
-        self._log.append_log("SYS: Map closed.")
 
     def _on_cam_frame(self, data: bytes) -> None:
         px = QPixmap()
@@ -5573,13 +5384,6 @@ class JarvisUI:
         """Thread-safe: display content in the panel below the HUD."""
         self._win._content_sig.emit(title[:48], text[:4000])
 
-    def show_map(self, location: str) -> None:
-        """Thread-safe: open a location in the HUD map."""
-        self._win._map_sig.emit(str(location or "").strip())
-
-    def close_map(self) -> None:
-        """Thread-safe: close the HUD map on the Qt main thread."""
-        self._win._map_close_sig.emit()
     def show_quiz(self, topic: str, questions, grade=None) -> None:
         """Thread-safe: put an interactive quiz on the board.
 
