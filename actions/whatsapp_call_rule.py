@@ -166,7 +166,7 @@ def _keyboard_call_action(action: str, player=None) -> tuple[bool, str]:
 
         label = "Accept/Answer" if action == "answer" else "Decline/Reject"
         details = f"Pressed Tab {tabs} times and Enter for WhatsApp {label}."
-        _log(self_player if False else player, f"[WhatsAppCall] {details}")
+        _log(player, f"[WhatsAppCall] {details}")
         return True, details
     except Exception as exc:
         return False, f"Keyboard {action} control failed: {exc}"
@@ -603,6 +603,7 @@ class WhatsAppCallWatcher:
                     # where the current End button is.
                     time.sleep(4.5)
 
+                    image2 = None
                     try:
                         image_bytes2, sx2, sy2, origin_x2, origin_y2, image2 = _capture_screen()
                         result2 = _vision(image_bytes2) or {}
@@ -611,7 +612,10 @@ class WhatsAppCallWatcher:
                         result2 = {}
 
                     state2 = str(result2.get("state") or "none").strip().lower()
-                    end_box2 = _valid_box(_box(result2.get("end_box")), image2.width, image2.height)
+                    if image2 is not None:
+                        end_box2 = _valid_box(_box(result2.get("end_box")), image2.width, image2.height)
+                    else:
+                        end_box2 = None
                     end_center2 = _center(end_box2)
 
                     ex = _coord(result2.get("end_x"))
@@ -662,7 +666,7 @@ _WATCHER_LOCK = threading.Lock()
 
 
 def _one_shot_call_action(action: str, player=None) -> str:
-    """Visually find and click Answer or Decline on the current incoming call."""
+    """Visually confirm an incoming call, then use keyboard-only control."""
     if platform.system() != "Windows":
         return "WhatsApp call control requires Windows."
 
