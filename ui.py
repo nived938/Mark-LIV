@@ -2924,61 +2924,47 @@ class RemoteKeyOverlay(QWidget):
 
 
 class MapPanel(QWidget):
-    """Interactive Google Maps surface rendered inside the JARVIS HUD."""
+    """Full-bleed Google Maps JavaScript API canvas inside the HUD."""
 
     closed = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setStyleSheet(f"background: {C.BG};")
+        self.setStyleSheet(f"background: {C.BG}; border: none;")
         self._location = ""
         self._api_key = ""
-        self._using_embed = False
-        self._fallback_url = ""
+        self._view = None
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
 
-        hdr = QWidget()
-        hdr.setFixedHeight(36)
-        hdr.setStyleSheet(
-            f"background: {C.DARK}; border-bottom: 1px solid {C.BORDER_B};"
-        )
-        h = QHBoxLayout(hdr)
-        h.setContentsMargins(10, 0, 8, 0)
-        title = QLabel("◈  MAP")
-        title.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
-        title.setStyleSheet(f"color: {C.PRI}; background: transparent;")
-        h.addWidget(title)
-
-        self._location_lbl = QLabel("")
-        self._location_lbl.setFont(QFont("Courier New", 8))
-        self._location_lbl.setStyleSheet(
-            f"color: {C.TEXT_MED}; background: transparent;"
-        )
-        h.addWidget(self._location_lbl, stretch=1)
-
-        close = QPushButton("✕  CLOSE")
-        close.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
-        close.setCursor(Qt.CursorShape.PointingHandCursor)
-        close.setStyleSheet(f"""
+        # The map itself fills the HUD. Only a tiny JARVIS close control is
+        # drawn over it, so there is no Google Maps webpage chrome.
+        self._close_btn = QPushButton("✕")
+        self._close_btn.setFixedSize(34, 34)
+        self._close_btn.setFont(QFont("Courier New", 10, QFont.Weight.Bold))
+        self._close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._close_btn.setStyleSheet(f"""
             QPushButton {{
-                color: {C.TEXT_DIM};
-                background: transparent;
-                border: none;
-                padding: 2px 6px;
+                background: rgba(0, 6, 10, 210);
+                color: {C.TEXT_MED};
+                border: 1px solid {C.BORDER_B};
+                border-radius: 4px;
+                padding: 0;
             }}
-            QPushButton:hover {{ color: {C.PRI}; }}
+            QPushButton:hover {{
+                color: {C.PRI};
+                border-color: {C.PRI};
+                background: rgba(0, 21, 32, 225);
+            }}
         """)
-        close.clicked.connect(self.closed.emit)
-        h.addWidget(close)
-        lay.addWidget(hdr)
+        self._close_btn.clicked.connect(self.closed.emit)
 
         if QWebEngineView is None:
             missing = QLabel(
-                "MAP ENGINE UNAVAILABLE\\n\\n"
-                "Install the HUD map dependency with:\\n"
+                "GOOGLE MAP ENGINE UNAVAILABLE\n\n"
+                "Install the HUD map dependency with:\n"
                 "python -m pip install PyQt6-WebEngine"
             )
             missing.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -2988,9 +2974,82 @@ class MapPanel(QWidget):
             self._view = None
         else:
             self._view = QWebEngineView()
-            self._view.setStyleSheet(f"background: {C.BG};")
+            self._view.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
+            self._view.setStyleSheet(f"background: {C.BG}; border: none;")
             self._view.loadFinished.connect(self._on_load_finished)
             lay.addWidget(self._view, stretch=1)
+
+        self._close_btn.setParent(self)
+        self._close_btn.raise_()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._close_btn is not None:
+            self._close_btn.move(max(8, self.width() - 46), 12)
+            self._close_btn.raise_()
+
+    @staticmethod
+    def _html(api_key: str, location: str) -> str:
+        import json as _json
+
+        key_js = _json.dumps(api_key)
+        location_js = _json.dumps(location)
+
+        return f"""<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+html,body,#map{{width:100%;height:100%;margin:0;padding:0;overflow:hidden;background:#00060a;}}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<script>
+let map;
+let geocoder;
+
+async function initMap() {{
+  try {{
+    const {{ Map }} = await google.maps.importLibrary("maps");
+    const {{ Geocoder }} = await google.maps.importLibrary("geocoding");
+
+    map = new Map(document.getElementById("map"), {{
+      center: {{lat: 12.4984, lng: 74.9869}},
+      zoom: 11,
+      mapTypeId: "roadmap",
+      disableDefaultUI: true,
+      keyboardShortcuts: false,
+      gestureHandling: "greedy",
+      clickableIcons: false,
+      streetViewControl: false,
+      fullscreenControl: false,
+      mapTypeControl: false,
+      rotateControl: false,
+      scaleControl: false,
+      zoomControl: false
+    }});
+
+    geocoder = new Geocoder();
+    const response = await geocoder.geocode({{address: {location_js}}});
+    if (response.results && response.results.length) {{
+      const result = response.results[0];
+      map.setCenter(result.geometry.location);
+      if (result.geometry.viewport) {{
+        map.fitBounds(result.geometry.viewport);
+        const z = map.getZoom() || 11;
+        map.setZoom(Math.min(15, Math.max(10, z)));
+      }}
+    }}
+  }} catch (err) {{
+    console.error("JARVIS map error:", err);
+  }}
+}}
+</script>
+<script async src="https://maps.googleapis.com/maps/api/js?key={api_key}&v=weekly&callback=initMap"></script>
+</body>
+</html>"""
 
     def show_location(self, location: str, api_key: str = "") -> None:
         location = " ".join(str(location or "").split()).strip()
@@ -2999,45 +3058,29 @@ class MapPanel(QWidget):
 
         self._location = location
         self._api_key = str(api_key or "").strip()
-        self._location_lbl.setText(location[:90])
 
         if self._view is None:
             return
 
-        from urllib.parse import quote_plus
-        encoded = quote_plus(location)
-        self._fallback_url = "https://www.google.com/maps/search/?api=1&query=" + encoded
-        self._using_embed = False
-
-        if self._api_key:
-            embed_url = (
-                "https://www.google.com/maps/embed/v1/search"
-                f"?key={quote_plus(self._api_key)}&q={encoded}"
+        if not self._api_key:
+            self._view.setHtml(
+                "<body style='background:#00060a;color:#5ab8cc;font-family:monospace;"
+                "display:grid;place-items:center;height:100%;text-align:center;'>"
+                "GOOGLE MAPS API KEY REQUIRED<br><br>"
+                "Add google_maps_api_key to config/api_keys.json"
+                "</body>"
             )
-            html = f"""<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<style>
-html,body,iframe{{margin:0;padding:0;width:100%;height:100%;border:0;background:#00060a;}}
-</style>
-</head>
-<body>
-<iframe src="{embed_url}" allowfullscreen></iframe>
-</body>
-</html>"""
-            self._using_embed = True
-            self._view.setHtml(html, QUrl("https://www.google.com/"))
-        else:
-            self._view.setUrl(QUrl(self._fallback_url))
+            return
+
+        self._view.setHtml(
+            self._html(self._api_key, location),
+            QUrl("https://maps.googleapis.com/")
+        )
 
     def _on_load_finished(self, ok: bool) -> None:
-        if ok or self._view is None:
-            return
-        if self._using_embed and self._fallback_url:
-            self._using_embed = False
-            self._view.setUrl(QUrl(self._fallback_url))
+        if not ok:
+            # Never fall back to google.com/maps. The HUD must stay map-only.
+            pass
 
 
 class MainWindow(QMainWindow):
