@@ -13,20 +13,19 @@ The rule is process-local: it stays active until disabled or JARVIS exits.
 from __future__ import annotations
 
 import io
+import json
 import platform
 import threading
 import time
 
-from PIL import Image, ImageChops
+from PIL import Image
 import pyautogui
-import pygetwindow
 
 
 _DEFAULT_MESSAGE = "Nived is not available right now."
-_POLL_SECONDS = 0.75
-_VISION_COOLDOWN = 1.75
-_MIN_CHANGE = 2.5
-_CONFIDENCE = 0.78
+_POLL_SECONDS = 0.6
+_VISION_COOLDOWN = 0.9
+_CONFIDENCE = 0.72
 
 
 def _log(player, message: str) -> None:
@@ -36,25 +35,14 @@ def _log(player, message: str) -> None:
         print(f"[WhatsAppCall] {message}")
 
 
-def _has_whatsapp_window() -> bool:
-    try:
-        for win in pygetwindow.getAllWindows():
-            title = str(getattr(win, "title", "") or "").lower()
-            if "whatsapp" in title and int(getattr(win, "width", 0) or 0) > 150:
-                return True
-    except Exception:
-        # pygetwindow can be incomplete on some Windows desktop states. The
-        # visual path is still safe because it independently requires "WhatsApp"
-        # in the model's classification.
-        return True
-    return False
-
-
-def _capture_screen() -> tuple[bytes, float, float, Image.Image]:
+def _capture_screen() -> tuple[bytes, float, float]:
+    """Capture the complete Windows desktop at high enough detail for visual UI detection."""
     screen = pyautogui.screenshot().convert("RGB")
     full_w, full_h = screen.size
 
-    max_w, max_h = 1280, 720
+    # Keep small WhatsApp call windows readable. A previous 1280x720 resize could
+    # make the answer/end buttons too small for the vision model on a 1080p+ display.
+    max_w, max_h = 1920, 1080
     scale = min(1.0, max_w / max(full_w, 1), max_h / max(full_h, 1))
     if scale < 1.0:
         img = screen.resize(
@@ -64,57 +52,66 @@ def _capture_screen() -> tuple[bytes, float, float, Image.Image]:
     else:
         img = screen
 
+    import io
     buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=82, optimize=False)
-    return buf.getvalue(), full_w / img.width, full_h / img.height, img
-
-
-def _changed(previous: Image.Image | None, current: Image.Image) -> bool:
-    if previous is None:
-        return True
-    a = previous.resize((64, 36), Image.Resampling.BILINEAR).convert("L")
-    b = current.resize((64, 36), Image.Resampling.BILINEAR).convert("L")
-    diff = ImageChops.difference(a, b)
-    # Mean pixel difference. Call notifications and their buttons change enough
-    # to exceed this, while tiny cursor motion generally does not.
-    mean = sum(diff.getdata()) / (64 * 36)
-    return mean >= _MIN_CHANGE
+    img.save(buf, format="JPEG", quality=90, optimize=False)
+    return buf.getvalue(), full_w / img.width, full_h / img.height
 
 
 def _vision(image_bytes: bytes) -> dict | None:
     from google.genai import types as gtypes
     from core import gemini
 
-    prompt = """
-Inspect this desktop screenshot visually.
+    prompt = r"""
+You are a visual UI detector for an automation program.
 
-You are looking ONLY for an actual WhatsApp Desktop incoming voice or video
-call. Ignore normal WhatsApp chats, notifications, banners, contact previews,
-and outgoing calls.
+Look at the ENTIRE desktop screenshot, not just the foreground window.
 
-Return ONLY JSON with this schema:
+Your only task is to detect an ACTIVE INCOMING WHATSAPP CALL displayed anywhere
+on the Windows desktop. The caller may appear in:
+- the main WhatsApp Desktop window,
+- a separate WhatsApp call window,
+- a small always-on-top incoming-call popup,
+- a notification-style call card.
+
+Do NOT require the text "WhatsApp" to be visible if the visual layout clearly
+matches a WhatsApp incoming voice/video call.
+
+Ignore:
+- normal WhatsApp chats,
+- contact cards,
+- message notifications,
+- ordinary Windows notifications,
+- WhatsApp settings,
+- outgoing calls started by the user,
+- any screen that is not actively ringing.
+
+Return ONLY one JSON object:
 {
-  "is_whatsapp": true|false,
-  "state": "incoming"|"connected"|"none",
+  "state": "incoming" | "connected" | "none",
   "confidence": 0.0,
-  "answer_x": integer|null,
-  "answer_y": integer|null,
-  "end_x": integer|null,
-  "end_y": integer|null
+  "answer_x": null,
+  "answer_y": null,
+  "end_x": null,
+  "end_y": null
 }
 
-Rules:
-- "incoming" means a call is actively ringing and an Answer/Accept control is
-  visibly available.
-- "connected" means the WhatsApp call is already connected and an End/Hang up
-  control is visibly available.
-- "none" means neither condition is clearly present.
-- Coordinates are pixel coordinates in THIS screenshot, measured from the
-  top-left corner.
-- Only provide answer_x/answer_y for a clearly visible Answer/Accept button.
-- Only provide end_x/end_y for a clearly visible End/Hang up button.
-- If anything is uncertain, use null coordinates and state "none".
-- Do not click anything. Do not describe the screenshot. JSON only.
+Coordinate rules:
+- Coordinates are PIXELS IN THIS EXACT SCREENSHOT.
+- (0,0) is the screenshot's top-left corner.
+- For "incoming", answer_x/answer_y MUST be the center of the green
+  Answer/Accept button.
+- For "connected", end_x/end_y MUST be the center of the red End/Hang Up button.
+- Never guess coordinates. Use null when the button is not clearly visible.
+
+State rules:
+- "incoming": the call is visibly ringing NOW and an Answer/Accept button is
+  visible.
+- "connected": the call is visibly connected NOW and a red End/Hang Up control
+  is visible.
+- "none": everything else.
+
+Set confidence between 0 and 1. Do not include markdown fences or explanations.
 """.strip()
 
     try:
@@ -187,38 +184,33 @@ class WhatsAppCallWatcher:
                 _log(self.player, "[WhatsAppCall] Windows desktop automation is required.")
                 return
 
-            previous_image = None
             last_vision = 0.0
 
             while not self._stop.wait(_POLL_SECONDS):
-                if not _has_whatsapp_window():
-                    continue
-
                 try:
-                    image_bytes, sx, sy, image = _capture_screen()
+                    image_bytes, sx, sy = _capture_screen()
                 except Exception as exc:
                     _log(self.player, f"[WhatsAppCall] Screen capture failed: {exc}")
                     continue
 
                 now = time.monotonic()
-                changed = _changed(previous_image, image)
-                previous_image = image
-
-                # Do not spend a Gemini vision request on an unchanged desktop.
-                # The incoming popup and the connected-call UI both create a
-                # screen change, so each state transition is still inspected.
-                if not changed:
-                    continue
                 if now - last_vision < _VISION_COOLDOWN:
                     continue
 
+                # This is intentionally visual-only. There is no title check,
+                # window check, OCR shortcut, or fixed WhatsApp coordinate.
                 result = _vision(image_bytes)
                 last_vision = now
-                if not result or not result.get("is_whatsapp"):
+
+                if not result:
                     continue
 
-                state = str(result.get("state") or "none").lower()
-                confidence = float(result.get("confidence") or 0.0)
+                state = str(result.get("state") or "none").strip().lower()
+                try:
+                    confidence = float(result.get("confidence") or 0.0)
+                except Exception:
+                    confidence = 0.0
+
                 if confidence < _CONFIDENCE:
                     state = "none"
 
@@ -229,13 +221,18 @@ class WhatsAppCallWatcher:
 
                 if state == "incoming" and not self._owned_call:
                     if answer_x is None or answer_y is None:
+                        _log(self.player, "[WhatsAppCall] Incoming-call visuals detected, but Answer was not clear enough.")
                         continue
 
-                    _log(self.player, "[WhatsAppCall] Incoming call identified visually. Answering.")
+                    _log(
+                        self.player,
+                        f"[WhatsAppCall] Visual detector found an incoming call "
+                        f"at ({round(answer_x * sx)},{round(answer_y * sy)}). Answering."
+                    )
                     pyautogui.click(round(answer_x * sx), round(answer_y * sy))
                     self._owned_call = True
                     self._message_sent = False
-                    time.sleep(1.25)
+                    time.sleep(1.0)
                     continue
 
                 if self._owned_call and state == "connected" and not self._message_sent:
@@ -249,8 +246,9 @@ class WhatsAppCallWatcher:
                         else:
                             _log(
                                 self.player,
-                                "[WhatsAppCall] No dedicated call-audio route found; "
-                                "JARVIS will use the normal speaker path.",
+                                "[WhatsAppCall] No virtual audio route found. "
+                                "The caller will only hear JARVIS when WhatsApp's microphone "
+                                "is routed to JARVIS's audio output."
                             )
                     except Exception as exc:
                         _log(self.player, f"[WhatsAppCall] Audio mirror unavailable: {exc}")
@@ -266,31 +264,32 @@ class WhatsAppCallWatcher:
                     except Exception as exc:
                         _log(self.player, f"[WhatsAppCall] Could not start the spoken reply: {exc}")
 
-                    # The sentence is short. Give the audio path time to finish
-                    # before attempting to hang up.
-                    time.sleep(4.0)
+                    # The speech path is allowed to finish before we ask vision
+                    # where the current End button is.
+                    time.sleep(4.5)
 
-                    # Refresh the call UI once, because the End button can move
-                    # after the call transitions from ringing to connected.
                     try:
-                        image_bytes2, sx2, sy2, image2 = _capture_screen()
+                        image_bytes2, sx2, sy2 = _capture_screen()
                         result2 = _vision(image_bytes2) or {}
-                    except Exception:
+                    except Exception as exc:
+                        _log(self.player, f"[WhatsAppCall] Could not re-check the connected call: {exc}")
                         result2 = {}
 
+                    state2 = str(result2.get("state") or "none").strip().lower()
+                    ex = _coord(result2.get("end_x"))
+                    ey = _coord(result2.get("end_y"))
+
                     if (
-                        str(result2.get("state") or "").lower() == "connected"
-                        and bool(result2.get("is_whatsapp"))
+                        state2 == "connected"
+                        and ex is not None
+                        and ey is not None
                     ):
-                        ex = _coord(result2.get("end_x"))
-                        ey = _coord(result2.get("end_y"))
-                        if ex is not None and ey is not None:
-                            _log(self.player, "[WhatsAppCall] Reply finished. Ending the call.")
-                            pyautogui.click(round(ex * sx2), round(ey * sy2))
-                        else:
-                            _log(self.player, "[WhatsAppCall] Reply finished, but no End button was visible.")
+                        _log(self.player, "[WhatsAppCall] Visual detector found End Call. Ending the call.")
+                        pyautogui.click(round(ex * sx2), round(ey * sy2))
+                    elif state2 == "connected":
+                        _log(self.player, "[WhatsAppCall] Call is connected, but End Call was not visually clear.")
                     else:
-                        _log(self.player, "[WhatsAppCall] Call already ended.")
+                        _log(self.player, "[WhatsAppCall] Call is no longer connected.")
 
                     try:
                         from core import call_audio
@@ -303,8 +302,8 @@ class WhatsAppCallWatcher:
                     continue
 
                 if self._owned_call and state == "none":
-                    # The other side may have ended the call. Do not click anything
-                    # once the connected UI disappears.
+                    # The other party may have ended the call. Never click a
+                    # coordinate after the connected call UI disappears.
                     self._owned_call = False
                     self._message_sent = False
                     try:
@@ -312,7 +311,6 @@ class WhatsAppCallWatcher:
                         call_audio.stop()
                     except Exception:
                         pass
-
 
         except Exception as exc:
             _log(self.player, f"[WhatsAppCall] Watcher stopped unexpectedly: {exc}")
