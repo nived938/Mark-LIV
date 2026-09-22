@@ -3,10 +3,9 @@
 The rule is armed by a normal JARVIS command such as:
     "If anyone calls me, tell them I am not available right now."
 
-While armed, a daemon thread watches the Windows desktop. It uses Gemini vision
-to identify a WhatsApp incoming-call surface, the Answer button and the End
-button. It only clicks when the vision result explicitly says the call is an
-incoming WhatsApp call with usable coordinates and reasonable confidence.
+While armed, a daemon thread watches the Windows desktop. It uses Gemini vision to identify a WhatsApp incoming-call surface, then uses
+Windows UI Automation to invoke the Answer/Decline/End controls directly
+without moving the physical mouse.
 
 The rule is process-local: it stays active until disabled or JARVIS exits.
 """
@@ -96,6 +95,134 @@ def _click_screen(x: int, y: int) -> None:
     user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
     time.sleep(0.05)
     user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+
+
+
+def _ui_automation_call_button(action: str, player=None) -> tuple[bool, str]:
+    """Find and invoke a WhatsApp call button through Windows UI Automation.
+
+    This intentionally does NOT move the mouse. UIA's InvokePattern asks the
+    control itself to perform its action. We look for an Answer/Accept control
+    together with a Decline/Reject control in the same visible window, which is
+    a strong signal that the buttons belong to an incoming-call surface.
+    """
+    if platform.system() != "Windows":
+        return False, "Windows UI Automation is only available on Windows."
+
+    answer_words = {"answer", "accept", "answer call", "accept call"}
+    decline_words = {"decline", "reject", "decline call", "reject call"}
+
+    try:
+        from pywinauto import Desktop
+    except Exception as exc:
+        return False, f"pywinauto unavailable: {exc}"
+
+    def norm(value) -> str:
+        return " ".join(str(value or "").strip().lower().split())
+
+    def proc_name(window) -> str:
+        try:
+            import psutil
+            pid = int(window.element_info.process_id)
+            return psutil.Process(pid).name().lower()
+        except Exception:
+            return ""
+
+    try:
+        desktop = Desktop(backend="uia")
+        windows = desktop.windows(visible_only=True, enabled_only=True)
+
+        paired = []
+        all_target = []
+
+        for window in windows:
+            try:
+                buttons = window.descendants(control_type="Button")
+            except Exception:
+                continue
+
+            answer_buttons = []
+            decline_buttons = []
+
+            for button in buttons:
+                try:
+                    if not button.is_visible() or not button.is_enabled():
+                        continue
+
+                    name = norm(button.window_text() or button.element_info.name)
+                    if not name:
+                        continue
+
+                    if name in answer_words:
+                        answer_buttons.append(button)
+                    if name in decline_words:
+                        decline_buttons.append(button)
+                except Exception:
+                    continue
+
+            if answer_buttons and decline_buttons:
+                paired.append((window, answer_buttons, decline_buttons))
+            if answer_buttons or decline_buttons:
+                all_target.append((window, answer_buttons, decline_buttons))
+
+        candidates = paired or all_target
+
+        # Prefer a WhatsApp-owned surface when several windows expose generic
+        # button names such as "Accept".
+        whatsapp_candidates = [
+            item for item in candidates
+            if (
+                "whatsapp" in norm(item[0].window_text())
+                or "whatsapp" in proc_name(item[0])
+            )
+        ]
+        candidates = whatsapp_candidates or candidates
+
+        for window, answer_buttons, decline_buttons in candidates:
+            buttons = answer_buttons if action == "answer" else decline_buttons
+            if not buttons:
+                continue
+
+            try:
+                window_title = norm(window.window_text()) or "<untitled>"
+            except Exception:
+                window_title = "<untitled>"
+
+            for button in buttons:
+                try:
+                    name = norm(button.window_text() or button.element_info.name)
+
+                    try:
+                        window.set_focus()
+                    except Exception:
+                        pass
+
+                    # InvokePattern executes the button directly. It does not
+                    # call moveTo/click/click_input or otherwise move the mouse.
+                    try:
+                        button.invoke()
+                    except Exception:
+                        iface = getattr(button, "iface_invoke", None)
+                        if iface is None:
+                            raise
+                        iface.Invoke()
+
+                    msg = (
+                        f"UI Automation invoked WhatsApp {action} button "
+                        f"'{name}' in window '{window_title}'."
+                    )
+                    _log(player, f"[WhatsAppCall] {msg}")
+                    return True, msg
+                except Exception as exc:
+                    _log(
+                        player,
+                        f"[WhatsAppCall] UI Automation could not invoke "
+                        f"{action} button: {exc}"
+                    )
+
+        return False, f"No usable UI Automation {action} button was found."
+    except Exception as exc:
+        return False, f"Windows UI Automation scan failed: {exc}"
 
 
 def _capture_screen() -> tuple[bytes, float, float, int, int, Image.Image]:
@@ -377,92 +504,46 @@ class WhatsAppCallWatcher:
                 )
 
                 if state == "incoming" and not self._owned_call:
-                    if answer_center is None:
-                        _log(self.player, "[WhatsAppCall] Incoming-call visuals detected, but Answer was not clear enough.")
+                    # Vision identifies the incoming call; Windows UI
+                    # Automation performs the actual Answer action without
+                    # touching the physical mouse.
+                    ok, details = _ui_automation_call_button("answer", self.player)
+                    if not ok:
+                        _log(
+                            self.player,
+                            f"[WhatsAppCall] Incoming call detected visually, "
+                            f"but UI Automation could not invoke Answer: {details}"
+                        )
                         continue
 
-                    click_x = origin_x + round(answer_center[0] * sx)
-                    click_y = origin_y + round(answer_center[1] * sy)
+                    time.sleep(0.85)
+
+                    try:
+                        verify_bytes, _, _, _, _, _ = _capture_screen()
+                        verify = _vision(verify_bytes) or {}
+                    except Exception as exc:
+                        _log(
+                            self.player,
+                            f"[WhatsAppCall] Could not verify the UI Automation Answer action: {exc}"
+                        )
+                        verify = {}
+
+                    verify_state = str(verify.get("state") or "none").strip().lower()
+                    try:
+                        verify_conf = float(verify.get("confidence") or 0.0)
+                    except Exception:
+                        verify_conf = 0.0
+
                     _log(
                         self.player,
-                        f"[WhatsAppCall] Visual Answer target: ({click_x},{click_y}). Answering."
+                        f"[WhatsAppCall] After UI Automation Answer: state={verify_state} confidence={verify_conf}"
                     )
 
-                    # Do not trust a single mouse event. WhatsApp may animate
-                    # the call card while the button is moving. Re-capture and
-                    # re-detect once after the first click, with one controlled
-                    # retry at the newly detected Answer position.
-                    accepted = False
-                    for attempt in range(2):
-                        try:
-                            _click_screen(click_x, click_y)
-                        except Exception as exc:
-                            _log(
-                                self.player,
-                                f"[WhatsAppCall] Windows click failed on attempt {attempt + 1}: {exc}"
-                            )
-                            break
-
-                        time.sleep(0.85)
-
-                        try:
-                            verify_bytes, vsx, vsy, vorigin_x, vorigin_y, verify_image = _capture_screen()
-                            verify = _vision(verify_bytes) or {}
-                        except Exception as exc:
-                            _log(
-                                self.player,
-                                f"[WhatsAppCall] Could not verify the Answer click: {exc}"
-                            )
-                            verify = {}
-
-                        verify_state = str(verify.get("state") or "none").strip().lower()
-                        try:
-                            verify_conf = float(verify.get("confidence") or 0.0)
-                        except Exception:
-                            verify_conf = 0.0
-
+                    if verify_state != "connected" or verify_conf < _CONFIDENCE:
                         _log(
                             self.player,
-                            f"[WhatsAppCall] After Answer click: state={verify_state} confidence={verify_conf}"
-                        )
-
-                        # Connected means the answer definitely took effect.
-                        if verify_state == "connected" and verify_conf >= _CONFIDENCE:
-                            accepted = True
-                            break
-
-                        # The call may still be ringing because the first click
-                        # missed. Re-detect the current Answer button and retry
-                        # exactly once at the fresh location.
-                        if attempt == 0 and verify_state == "incoming" and verify_conf >= _CONFIDENCE:
-                            fresh_box = _valid_box(
-                                _box(verify.get("answer_box")),
-                                verify_image.width,
-                                verify_image.height,
-                            )
-                            fresh_center = _center(fresh_box)
-
-                            if fresh_center is None:
-                                fresh_x = _coord(verify.get("answer_x"))
-                                fresh_y = _coord(verify.get("answer_y"))
-                                if fresh_x is not None and fresh_y is not None:
-                                    fresh_center = (fresh_x, fresh_y)
-
-                            if fresh_center is not None:
-                                click_x = vorigin_x + round(fresh_center[0] * vsx)
-                                click_y = vorigin_y + round(fresh_center[1] * vsy)
-                                _log(
-                                    self.player,
-                                    f"[WhatsAppCall] Answer still visible. Retrying at fresh target: ({click_x},{click_y})."
-                                )
-                                continue
-
-                        break
-
-                    if not accepted:
-                        _log(
-                            self.player,
-                            "[WhatsAppCall] Answer click could not be visually verified; leaving watcher armed."
+                            "[WhatsAppCall] Answer was invoked but the connected state "
+                            "was not visually confirmed; leaving watcher armed."
                         )
                         continue
 
@@ -584,31 +665,14 @@ def _one_shot_call_action(action: str, player=None) -> str:
         _log(player, f"[WhatsAppCall] Visual {action} rejected: state={state} confidence={confidence}")
         return "No active incoming WhatsApp call was visually confirmed."
 
-    box_key = "answer_box" if action == "answer" else "decline_box"
-    x_key = "answer_x" if action == "answer" else "decline_x"
-    y_key = "answer_y" if action == "answer" else "decline_y"
+    ok, details = _ui_automation_call_button(action, player)
+    if ok:
+        return details
 
-    box = _valid_box(_box(result.get(box_key)), image.width, image.height)
-    center = _center(box)
-
-    if center is None:
-        x = _coord(result.get(x_key))
-        y = _coord(result.get(y_key))
-        center = (x, y) if x is not None and y is not None else None
-
-    if center is None:
-        return f"Visual detector found the incoming call but not the {action} button."
-
-    click_x = origin_x + round(center[0] * sx)
-    click_y = origin_y + round(center[1] * sy)
-
-    _log(player, f"[WhatsAppCall] Visual {action} target: ({click_x},{click_y})")
-    try:
-        _click_screen(click_x, click_y)
-    except Exception as exc:
-        _log(player, f"[WhatsAppCall] Windows {action} click failed: {exc}")
-        return f"Found the WhatsApp {action} button, but Windows rejected the click: {exc}"
-    return f"Visually located and clicked WhatsApp {action}."
+    return (
+        f"Visually confirmed the incoming WhatsApp call, but Windows UI "
+        f"Automation could not invoke {action}: {details}"
+    )
 
 
 
