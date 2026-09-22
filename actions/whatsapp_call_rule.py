@@ -13,7 +13,6 @@ The rule is process-local: it stays active until disabled or JARVIS exits.
 from __future__ import annotations
 
 import ctypes
-import ctypes
 import platform
 import threading
 import time
