@@ -408,28 +408,34 @@ Engineered by a developer building a real-world JARVIS-style assistant.
 
 ## HUD map
 
-JARVIS can open a requested place directly inside the center HUD. For example:
+JARVIS opens a requested location as a map-only surface inside the HUD, not the normal Google Maps website. For example:
 
-`look at Kasaragod`  
-`show Kasaragod on the map`  
-`open the map for London`
+\`look at Kasaragod\`
+\`show Kasaragod on the map\`
+\`open the map for London\`
 
-The default implementation uses Google's official Maps URLs, which do not require a Google Maps API key. The map is embedded in the desktop HUD with Qt WebEngine. Google documents Maps URLs as a free, keyless way to launch searches and map views.
+The map is rendered with the Google Maps JavaScript API. Google allows the default map UI controls to be disabled with \`disableDefaultUI\`, while \`gestureHandling\` controls dragging, panning and zoom gestures. This build leaves the map interactive but removes the Google search box, map type, fullscreen, Street View, keyboard shortcuts and other default controls. citeturn305295search0turn305295search1
 
-### Optional Google Cloud setup
+### Google Cloud setup
 
-A Google Cloud project is **not required** for the default map mode.
+A standard Google Maps JavaScript API integration needs an API key and billing enabled. Google also provides a Maps Demo Key for prototyping without billing, but that is intended for testing rather than production. citeturn305295search2turn305295search4
 
-For a dedicated Maps Embed API integration, create a Google Cloud project with the human-readable name **Jarvis**, enable the **Maps Embed API**, create an API key, and restrict that key to the Maps Embed API. Google currently documents Maps Embed API requests as available at no charge, but a billing account is still required for the project.
+Create a Google Cloud project named **Jarvis**, then enable:
 
-Add the key to your local `config/api_keys.json`:
+- **Maps JavaScript API**
+- **Geocoding API**
 
-```json
+The Geocoding API converts a spoken place such as \`Kasaragod\` into coordinates so the map can center on it. Google documents the JavaScript geocoder and its requirement for the Geocoding API. citeturn868134search1
+
+Create an API key and restrict it to the enabled APIs. Then add it to your local \`config/api_keys.json\`:
+
+\`\`\`json
 {
-  "google_maps_api_key": "YOUR_KEY"
+    "gemini_api_key": "YOUR_GEMINI_KEY",
+    "os_system": "windows",
+    "google_maps_api_key": "YOUR_GOOGLE_MAPS_KEY"
 }
-```
+\`\`\`
 
-Do not commit that file. It is local configuration.
+The normal \`google.com/maps\` website is intentionally not used anymore, so this action stays inside the HUD as a map canvas.
 
-The map dependency is `PyQt6-WebEngine`, which provides the embedded Chromium-based web view used by the HUD.
