@@ -27,6 +27,13 @@ from PyQt6.QtGui import (
     QFontDatabase, QKeySequence, QLinearGradient, QPainter, QPainterPath,
     QPen, QPixmap, QRadialGradient, QShortcut,
 )
+try:
+    from PyQt6.QtWebEngineWidgets import QWebEngineView
+    _WEBENGINE_AVAILABLE = True
+except Exception:
+    QWebEngineView = None
+    _WEBENGINE_AVAILABLE = False
+
 from PyQt6.QtWidgets import (
     QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QPushButton, QScrollArea, QSizePolicy, QSplitter,
@@ -2916,6 +2923,123 @@ class RemoteKeyOverlay(QWidget):
         self.closed.emit()
 
 
+class MapPanel(QWidget):
+    """Interactive Google Maps surface rendered inside the JARVIS HUD."""
+
+    closed = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet(f"background: {C.BG};")
+        self._location = ""
+        self._api_key = ""
+        self._using_embed = False
+        self._fallback_url = ""
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        hdr = QWidget()
+        hdr.setFixedHeight(36)
+        hdr.setStyleSheet(
+            f"background: {C.DARK}; border-bottom: 1px solid {C.BORDER_B};"
+        )
+        h = QHBoxLayout(hdr)
+        h.setContentsMargins(10, 0, 8, 0)
+        title = QLabel("◈  MAP")
+        title.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        title.setStyleSheet(f"color: {C.PRI}; background: transparent;")
+        h.addWidget(title)
+
+        self._location_lbl = QLabel("")
+        self._location_lbl.setFont(QFont("Courier New", 8))
+        self._location_lbl.setStyleSheet(
+            f"color: {C.TEXT_MED}; background: transparent;"
+        )
+        h.addWidget(self._location_lbl, stretch=1)
+
+        close = QPushButton("✕  CLOSE")
+        close.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+        close.setCursor(Qt.CursorShape.PointingHandCursor)
+        close.setStyleSheet(f"""
+            QPushButton {{
+                color: {C.TEXT_DIM};
+                background: transparent;
+                border: none;
+                padding: 2px 6px;
+            }}
+            QPushButton:hover {{ color: {C.PRI}; }}
+        """)
+        close.clicked.connect(self.closed.emit)
+        h.addWidget(close)
+        lay.addWidget(hdr)
+
+        if QWebEngineView is None:
+            missing = QLabel(
+                "MAP ENGINE UNAVAILABLE\\n\\n"
+                "Install the HUD map dependency with:\\n"
+                "python -m pip install PyQt6-WebEngine"
+            )
+            missing.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            missing.setFont(QFont("Courier New", 9))
+            missing.setStyleSheet(f"color: {C.TEXT_MED}; background: {C.PANEL};")
+            lay.addWidget(missing, stretch=1)
+            self._view = None
+        else:
+            self._view = QWebEngineView()
+            self._view.setStyleSheet(f"background: {C.BG};")
+            self._view.loadFinished.connect(self._on_load_finished)
+            lay.addWidget(self._view, stretch=1)
+
+    def show_location(self, location: str, api_key: str = "") -> None:
+        location = " ".join(str(location or "").split()).strip()
+        if not location:
+            return
+
+        self._location = location
+        self._api_key = str(api_key or "").strip()
+        self._location_lbl.setText(location[:90])
+
+        if self._view is None:
+            return
+
+        from urllib.parse import quote_plus
+        encoded = quote_plus(location)
+        self._fallback_url = "https://www.google.com/maps/search/?api=1&query=" + encoded
+        self._using_embed = False
+
+        if self._api_key:
+            embed_url = (
+                "https://www.google.com/maps/embed/v1/search"
+                f"?key={quote_plus(self._api_key)}&q={encoded}"
+            )
+            html = f"""<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+html,body,iframe{{margin:0;padding:0;width:100%;height:100%;border:0;background:#00060a;}}
+</style>
+</head>
+<body>
+<iframe src="{embed_url}" allowfullscreen></iframe>
+</body>
+</html>"""
+            self._using_embed = True
+            self._view.setHtml(html, QUrl("https://www.google.com/"))
+        else:
+            self._view.setUrl(QUrl(self._fallback_url))
+
+    def _on_load_finished(self, ok: bool) -> None:
+        if ok or self._view is None:
+            return
+        if self._using_embed and self._fallback_url:
+            self._using_embed = False
+            self._view.setUrl(QUrl(self._fallback_url))
+
+
 class MainWindow(QMainWindow):
     _log_sig        = pyqtSignal(str)
     _state_sig      = pyqtSignal(str)
@@ -2923,6 +3047,8 @@ class MainWindow(QMainWindow):
     _reconfig_sig   = pyqtSignal()           # trigger setup overlay from any thread
     _camera_sig     = pyqtSignal(bytes)      # show camera frame preview (small overlay)
     _cam_stream_sig = pyqtSignal(bool)       # True=start live stream, False=stop
+    _map_sig        = pyqtSignal(str)       # open requested location in HUD map
+    _map_close_sig  = pyqtSignal()       # close map on the Qt main thread
     _cam_frame_sig  = pyqtSignal(bytes)      # live camera frame → HUD area
     _clipboard_sig  = pyqtSignal(str)        # clipboard text changed (thread-safe)
     _confirm_sig    = pyqtSignal(str, str)   # (title, detail) — irreversible-action gate
@@ -3035,6 +3161,11 @@ class MainWindow(QMainWindow):
         self._hud_cam_stack.addWidget(self.hud)
         self._hud_cam_stack.addWidget(_cam_cont)
 
+        # HUD map surface, index 2. It replaces the animated head while open.
+        self._map_panel = MapPanel()
+        self._map_panel.closed.connect(self.close_map)
+        self._hud_cam_stack.addWidget(self._map_panel)
+
         self._center_split = QSplitter(Qt.Orientation.Vertical)
         self._center_split.setStyleSheet(f"""
             QSplitter::handle {{
@@ -3085,6 +3216,8 @@ class MainWindow(QMainWindow):
         self._confirm_hide_sig.connect(self._hide_confirm_banner)
         self._cam_stream_sig.connect(self._on_cam_stream)
         self._cam_frame_sig.connect(self._on_cam_frame)
+        self._map_sig.connect(self._on_map)
+        self._map_close_sig.connect(self.close_map)
         self._clipboard_sig.connect(self._show_clipboard_panel)
         self._wake_dl_sig.connect(self._on_wake_install_done)
         self._quiz_sig.connect(self._show_quiz)
@@ -3131,6 +3264,21 @@ class MainWindow(QMainWindow):
         else:
             self._hud_cam_stack.setCurrentIndex(0)
             self._cam_live_lbl.clear()
+
+    def _on_map(self, location: str) -> None:
+        """Slot on Qt main thread: display a requested location in the HUD."""
+        cfg = _read_full_config()
+        api_key = (cfg.get("google_maps_api_key") or "").strip()
+        self._map_panel.show_location(location, api_key)
+        self._hud_cam_stack.setCurrentIndex(2)
+        self._content_panel.hide()
+        self._quiz_panel.hide()
+        self._log.append_log(f"SYS: Map opened — {location}")
+
+    def close_map(self) -> None:
+        """Return the center surface from the map to the animated HUD."""
+        self._hud_cam_stack.setCurrentIndex(0)
+        self._log.append_log("SYS: Map closed.")
 
     def _on_cam_frame(self, data: bytes) -> None:
         px = QPixmap()
@@ -5382,6 +5530,13 @@ class JarvisUI:
         """Thread-safe: display content in the panel below the HUD."""
         self._win._content_sig.emit(title[:48], text[:4000])
 
+    def show_map(self, location: str) -> None:
+        """Thread-safe: open a location in the HUD map."""
+        self._win._map_sig.emit(str(location or "").strip())
+
+    def close_map(self) -> None:
+        """Thread-safe: close the HUD map on the Qt main thread."""
+        self._win._map_close_sig.emit()
     def show_quiz(self, topic: str, questions, grade=None) -> None:
         """Thread-safe: put an interactive quiz on the board.
 
