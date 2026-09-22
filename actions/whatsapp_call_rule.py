@@ -20,6 +20,7 @@ import time
 
 from PIL import Image
 import pyautogui
+import mss
 
 
 _DEFAULT_MESSAGE = "Nived is not available right now."
@@ -35,27 +36,40 @@ def _log(player, message: str) -> None:
         print(f"[WhatsAppCall] {message}")
 
 
-def _capture_screen() -> tuple[bytes, float, float]:
-    """Capture the complete Windows desktop at high enough detail for visual UI detection."""
-    screen = pyautogui.screenshot().convert("RGB")
-    full_w, full_h = screen.size
+def _capture_screen() -> tuple[bytes, float, float, int, int]:
+    """Capture the complete Windows virtual desktop, including all monitors."""
+    with mss.mss() as sct:
+        desktop = sct.monitors[0]  # [0] is the bounding rectangle of all monitors.
+        shot = sct.grab(desktop)
 
-    # Keep small WhatsApp call windows readable. A previous 1280x720 resize could
-    # make the answer/end buttons too small for the vision model on a 1080p+ display.
+    full_w, full_h = shot.width, shot.height
+    origin_x, origin_y = int(desktop["left"]), int(desktop["top"])
+
+    # Keep buttons and text readable while avoiding an unnecessarily huge image.
     max_w, max_h = 1920, 1080
     scale = min(1.0, max_w / max(full_w, 1), max_h / max(full_h, 1))
+
     if scale < 1.0:
-        img = screen.resize(
+        img = Image.frombytes("RGB", (full_w, full_h), shot.rgb)
+        img = img.resize(
             (max(1, round(full_w * scale)), max(1, round(full_h * scale))),
             Image.Resampling.LANCZOS,
         )
     else:
-        img = screen
+        img = Image.frombytes("RGB", (full_w, full_h), shot.rgb)
 
     import io
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=90, optimize=False)
-    return buf.getvalue(), full_w / img.width, full_h / img.height
+
+    # sx/sy map model coordinates back to real Windows virtual-desktop pixels.
+    return (
+        buf.getvalue(),
+        full_w / img.width,
+        full_h / img.height,
+        origin_x,
+        origin_y,
+    )
 
 
 def _vision(image_bytes: bytes) -> dict | None:
@@ -188,7 +202,7 @@ class WhatsAppCallWatcher:
 
             while not self._stop.wait(_POLL_SECONDS):
                 try:
-                    image_bytes, sx, sy = _capture_screen()
+                    image_bytes, sx, sy, origin_x, origin_y = _capture_screen()
                 except Exception as exc:
                     _log(self.player, f"[WhatsAppCall] Screen capture failed: {exc}")
                     continue
@@ -203,7 +217,14 @@ class WhatsAppCallWatcher:
                 last_vision = now
 
                 if not result:
+                    _log(self.player, "[WhatsAppCall] Visual scan returned no result.")
                     continue
+
+                _log(
+                    self.player,
+                    "[WhatsAppCall] Vision scan: "
+                    f"state={result.get('state')} confidence={result.get('confidence')}"
+                )
 
                 state = str(result.get("state") or "none").strip().lower()
                 try:
@@ -229,7 +250,9 @@ class WhatsAppCallWatcher:
                         f"[WhatsAppCall] Visual detector found an incoming call "
                         f"at ({round(answer_x * sx)},{round(answer_y * sy)}). Answering."
                     )
-                    pyautogui.click(round(answer_x * sx), round(answer_y * sy))
+                    click_x = origin_x + round(answer_x * sx)
+                    click_y = origin_y + round(answer_y * sy)
+                    pyautogui.click(click_x, click_y)
                     self._owned_call = True
                     self._message_sent = False
                     time.sleep(1.0)
@@ -269,7 +292,7 @@ class WhatsAppCallWatcher:
                     time.sleep(4.5)
 
                     try:
-                        image_bytes2, sx2, sy2 = _capture_screen()
+                        image_bytes2, sx2, sy2, origin_x2, origin_y2 = _capture_screen()
                         result2 = _vision(image_bytes2) or {}
                     except Exception as exc:
                         _log(self.player, f"[WhatsAppCall] Could not re-check the connected call: {exc}")
