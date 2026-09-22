@@ -97,11 +97,27 @@ class WhatsAppIncomingAgent:
         self._visual_present = False
         self._event_cooldown_until = 0.0
         self._last_visual_signature = None
+        self._callbacks: list[Callable[[IncomingCall], None]] = []
 
     @property
     def pending(self) -> Optional[IncomingCall]:
         with self._lock:
             return self._pending
+
+    def add_callback(self, callback: Callable[[IncomingCall], None]) -> None:
+        """Register an additional incoming-call listener without replacing existing listeners."""
+        if not callable(callback):
+            return
+        with self._lock:
+            if callback not in self._callbacks:
+                self._callbacks.append(callback)
+
+    def remove_callback(self, callback: Callable[[IncomingCall], None]) -> None:
+        with self._lock:
+            try:
+                self._callbacks.remove(callback)
+            except ValueError:
+                pass
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -741,9 +757,19 @@ class WhatsAppIncomingAgent:
                     f"[WhatsAppAgent] Incoming call detected from {call.caller} "
                     f"via {', '.join(call.detection_sources) or 'unknown'}."
                 )
+                callbacks = []
                 if self.on_incoming:
+                    callbacks.append(self.on_incoming)
+                with self._lock:
+                    callbacks.extend(self._callbacks)
+
+                seen = set()
+                for callback in callbacks:
+                    if id(callback) in seen:
+                        continue
+                    seen.add(id(callback))
                     try:
-                        self.on_incoming(call)
+                        callback(call)
                     except Exception as exc:
                         print(f"[WhatsAppAgent] Event callback failed: {exc}")
             except Exception as exc:
