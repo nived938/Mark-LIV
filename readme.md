@@ -406,36 +406,29 @@ Engineered by a developer building a real-world JARVIS-style assistant.
 | YouTube | [@FatihMakes](https://www.youtube.com/@FatihMakes) |
 | Instagram | [@fatihmakes](https://www.instagram.com/fatihmakes) |
 
-## HUD map
 
-JARVIS opens a requested location as a map-only surface inside the HUD, not the normal Google Maps website. For example:
+## WhatsApp call auto-reply
 
-\`look at Kasaragod\`
-\`show Kasaragod on the map\`
-\`open the map for London\`
+JARVIS can arm a temporary rule from a voice command such as:
 
-The map is rendered with the Google Maps JavaScript API. Google allows the default map UI controls to be disabled with \`disableDefaultUI\`, while \`gestureHandling\` controls dragging, panning and zoom gestures. This build leaves the map interactive but removes the Google search box, map type, fullscreen, Street View, keyboard shortcuts and other default controls. citeturn305295search0turn305295search1
+`If anyone calls me, tell them I am not available right now.`
 
-### Google Cloud setup
+While the rule is active, JARVIS watches the Windows desktop and uses Gemini vision to identify an actual incoming WhatsApp Desktop voice/video call. It visually finds the Answer button, answers the call, speaks the configured sentence, then visually finds and presses the End call button.
 
-A standard Google Maps JavaScript API integration needs an API key and billing enabled. Google also provides a Maps Demo Key for prototyping without billing, but that is intended for testing rather than production. citeturn305295search2turn305295search4
+The rule is process-local. It stays active until you say to stop automatic WhatsApp call answering or until JARVIS exits.
 
-Create a Google Cloud project named **Jarvis**, then enable:
+### Caller audio routing
 
-- **Maps JavaScript API**
-- **Geocoding API**
+JARVIS's normal speech playback is not automatically a Windows microphone device. For the caller to hear JARVIS clearly, WhatsApp needs a microphone route that receives the JARVIS output.
 
-The Geocoding API converts a spoken place such as \`Kasaragod\` into coordinates so the map can center on it. Google documents the JavaScript geocoder and its requirement for the Geocoding API. citeturn868134search1
+The auto-reply feature looks for a dedicated virtual audio output such as **VB-CABLE Input**, **VoiceMeeter Input**, or another configured endpoint. Set the matching virtual output/input pair in WhatsApp and, when needed, put the endpoint name in `config/api_keys.json`:
 
-Create an API key and restrict it to the enabled APIs. Then add it to your local \`config/api_keys.json\`:
-
-\`\`\`json
+```json
 {
     "gemini_api_key": "YOUR_GEMINI_KEY",
     "os_system": "windows",
-    "google_maps_api_key": "YOUR_GOOGLE_MAPS_KEY"
+    "whatsapp_call_audio_device": "CABLE Input"
 }
-\`\`\`
+```
 
-The normal \`google.com/maps\` website is intentionally not used anymore, so this action stays inside the HUD as a map canvas.
-
+The project does not install a virtual audio driver. When no dedicated route is available, JARVIS still answers and speaks through its normal speaker path, but whether the caller hears that audio depends on the microphone/audio setup of the PC.
