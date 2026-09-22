@@ -292,7 +292,7 @@ def whatsapp_advance(parameters=None, **_ctx):
     if action in ("accept_incoming", "answer_incoming"):
         from actions.whatsapp_incoming_agent import get_incoming_agent
         agent = get_incoming_agent()
-        if not (agent._thread and agent._thread.is_alive()):
+        if not agent.running:
             agent.start()
         caller = agent.pending.caller if agent.pending else (contact or "the caller")
         ok, error = agent.accept()
