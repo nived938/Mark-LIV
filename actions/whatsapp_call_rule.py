@@ -239,7 +239,6 @@ class WhatsAppCallWatcher:
                 if now - last_vision < _VISION_COOLDOWN:
                     continue
 
-                # window check, OCR shortcut, or fixed WhatsApp coordinate.
                 result = _vision(image_bytes)
                 last_vision = now
 
@@ -335,7 +334,9 @@ class WhatsAppCallWatcher:
                         and ey is not None
                     ):
                         _log(self.player, "[WhatsAppCall] Visual detector found End Call. Ending the call.")
-                        pyautogui.click(round(ex * sx2), round(ey * sy2))
+                        click_x2 = origin_x2 + round(ex * sx2)
+                        click_y2 = origin_y2 + round(ey * sy2)
+                        pyautogui.click(click_x2, click_y2)
                     elif state2 == "connected":
                         _log(self.player, "[WhatsAppCall] Call is connected, but End Call was not visually clear.")
                     else:
