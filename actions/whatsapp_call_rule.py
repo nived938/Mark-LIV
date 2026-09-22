@@ -238,7 +238,9 @@ def whatsapp_call_rule(parameters: dict, player=None, speak=None) -> str:
                 except Exception:
                     pass
                 _WATCHER = None
-            agent.stop()
+            # The incoming-call agent is shared with whatsapp_advance and the
+            # main app, so disabling only removes the auto-answer callback.
+            # Detection stays alive for normal accept/decline commands.
             try:
                 from core import call_audio
                 call_audio.stop()
@@ -253,7 +255,8 @@ def whatsapp_call_rule(parameters: dict, player=None, speak=None) -> str:
                 and get_incoming_agent()._thread.is_alive()
             )
             if running:
-                return f"WhatsApp auto-reply is active. Message: {message or _DEFAULT_MESSAGE}"
+                current = getattr(_WATCHER, "message", "") or message or _DEFAULT_MESSAGE
+                return f"WhatsApp auto-reply is active. Message: {current}"
             return "WhatsApp auto-reply is disabled."
 
         if player is None or speak is None:
