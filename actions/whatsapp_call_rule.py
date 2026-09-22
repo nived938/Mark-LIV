@@ -22,6 +22,11 @@ _WATCHER = None
 _WATCHER_LOCK = threading.Lock()
 
 
+def auto_reply_active() -> bool:
+    """Return whether the explicit WhatsApp auto-reply rule is currently armed."""
+    return _WATCHER is not None
+
+
 def _log(player, message: str) -> None:
     try:
         player.write_log(message)
