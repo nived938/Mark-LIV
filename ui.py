@@ -59,7 +59,7 @@ def _read_full_config() -> dict:
 
 # Single source of truth for the release name — the window title, the header
 # badge and the readme must never disagree again.
-APP_VERSION  = "MARK LIV"
+APP_VERSION  = "JARVIS MARK 42"
 APP_PROTOCOL = APP_VERSION.split()[-1]
 
 _DEFAULT_W, _DEFAULT_H = 980, 700
@@ -3808,7 +3808,7 @@ class MainWindow(QMainWindow):
         lay.addWidget(_sec("COMMAND INPUT"))
         lay.addLayout(self._build_input_row())
 
-        self._interrupt_btn = QPushButton("✋  INTERRUPT  [ESC]")
+        self._interrupt_btn = QPushButton("✋  STOP JARVIS  [ESC]")
         self._interrupt_btn.setFixedHeight(34)
         self._interrupt_btn.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
         self._interrupt_btn.setCursor(Qt.CursorShape.PointingHandCursor)
