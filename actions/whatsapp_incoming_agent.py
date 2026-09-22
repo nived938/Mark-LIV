@@ -332,12 +332,10 @@ class WhatsAppIncomingAgent:
                 if visual_signature == self._last_visual_signature:
                     return None
                 self._last_visual_signature = visual_signature
-                now = time.time()
                 # Visual matching is intentionally silent here. A color pair
                 # on the desktop is only a supporting signal and is not itself
                 # considered an incoming call. Actual events are logged after
                 # notification/UIA corroboration in _find_incoming().
-                return (a[2], a[3]), (d[2], d[3])
                 return (a[2], a[3]), (d[2], d[3])
         except Exception:
             return None
@@ -566,11 +564,12 @@ class WhatsAppIncomingAgent:
         # Detector 2: visual controls. This is intentionally independent of
         # WhatsApp's accessibility tree.
         points = self._visual_call_controls()
-        if points and "notification" in sources:
+        if points and ("notification" in sources or "win32" in sources):
             accept_point, decline_point = points
             sources.append("vision")
+            notification_text = notification[1] if notification else ""
             return IncomingCall(
-                caller=caller or self._caller_from_text(notification[1]) or "unknown caller",
+                caller=caller or self._caller_from_text(notification_text) or "unknown caller",
                 window=None,
                 accept_control=None,
                 decline_control=None,
@@ -597,40 +596,64 @@ class WhatsAppIncomingAgent:
                 return False, str(exc)
 
     def _focus_whatsapp_call_window(self, call: Optional[IncomingCall]) -> bool:
-        """Focus the detected WhatsApp call window before keyboard navigation."""
+        """Focus the actual WhatsApp call surface before keyboard navigation."""
         if platform.system() != "Windows":
             return False
 
         try:
             user32 = ctypes.windll.user32
+            target_hwnd = 0
 
-            # UIA found a concrete top-level window.
             if call is not None and call.window is not None:
                 try:
-                    call.window.restore()
+                    target_hwnd = int(call.window.handle)
                 except Exception:
-                    pass
+                    target_hwnd = 0
+
+            foreground = int(user32.GetForegroundWindow() or 0)
+            if not target_hwnd and foreground:
+                for item in self._win32_whatsapp_windows():
+                    if int(item.get("hwnd") or 0) == foreground:
+                        target_hwnd = foreground
+                        break
+
+            if not target_hwnd:
+                visible = [w for w in self._win32_whatsapp_windows() if w.get("visible")]
+
+                def area(item):
+                    try:
+                        rect = wintypes.RECT()
+                        user32.GetWindowRect(item["hwnd"], ctypes.byref(rect))
+                        return max(1, int(rect.right - rect.left)) * max(
+                            1, int(rect.bottom - rect.top)
+                        )
+                    except Exception:
+                        return 10**18
+
+                if visible:
+                    target_hwnd = int(min(visible, key=area).get("hwnd") or 0)
+
+            if not target_hwnd:
+                return False
+
+            try:
+                user32.ShowWindow(target_hwnd, 9)
+            except Exception:
+                pass
+
+            try:
+                user32.SetForegroundWindow(target_hwnd)
+            except Exception:
+                pass
+
+            if call is not None and call.window is not None:
                 try:
                     call.window.set_focus()
                 except Exception:
-                    try:
-                        hwnd = int(call.window.handle)
-                        user32.SetForegroundWindow(hwnd)
-                    except Exception:
-                        pass
+                    pass
 
-            # Visual-only detection has no UIA window. Locate the WhatsApp
-            # top-level window with Win32 and focus the foreground-capable one.
-            if call is None or call.window is None:
-                windows = self._win32_whatsapp_windows()
-                visible = [w for w in windows if w.get("visible")]
-                if visible:
-                    hwnd = visible[0].get("hwnd")
-                    if hwnd:
-                        user32.SetForegroundWindow(hwnd)
-
-            time.sleep(0.2)
-            return True
+            time.sleep(0.20)
+            return int(user32.GetForegroundWindow() or 0) == target_hwnd
         except Exception:
             return False
 
@@ -651,7 +674,8 @@ class WhatsAppIncomingAgent:
                 pyautogui.press("tab")
                 time.sleep(0.12)
             pyautogui.press("enter")
-            return True, f"Focused WhatsApp and pressed Tab {tabs} times + Enter."
+            label = "Accept" if action == "accept" else "Decline"
+            return True, f"Focused WhatsApp call window and used {label}: Tab x{tabs} + Enter."
         except Exception as exc:
             return False, f"Keyboard control failed: {exc}"
 
