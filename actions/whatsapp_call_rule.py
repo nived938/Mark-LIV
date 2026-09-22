@@ -213,7 +213,7 @@ def whatsapp_call_rule(parameters: dict, player=None, speak=None) -> str:
 
     if action in {"answer", "accept"}:
         agent = get_incoming_agent()
-        if not (agent._thread and agent._thread.is_alive()):
+        if not agent.running:
             agent.start()
         ok, error = agent.accept()
         if ok:
