@@ -49,6 +49,7 @@ import numpy as np
 from google import genai
 from google.genai import types
 from ui import JarvisUI
+from core import call_audio
 from memory.memory_manager import (
     load_memory, update_memory, format_memory_for_prompt,
     save_session_summary, pop_last_session,
@@ -1707,6 +1708,8 @@ class JarvisLive:
                         self._echo.note_output(pcm, RECEIVE_SAMPLE_RATE, lvl)
                 except Exception:
                     pass
+
+                call_audio.push(bytes(batch))
 
                 try:
                     await asyncio.to_thread(stream.write, bytes(batch))
