@@ -12,6 +12,7 @@ The rule is process-local: it stays active until disabled or JARVIS exits.
 """
 from __future__ import annotations
 
+import ctypes
 import io
 import json
 import platform
@@ -27,7 +28,8 @@ _DEFAULT_MESSAGE = "Nived is not available right now."
 _POLL_SECONDS = 0.65
 _VISION_COOLDOWN = 1.0
 _MIN_CHANGE = 0.7
-_CONFIDENCE = 0.72
+_CONFIDENCE = 0.70
+_DPI_AWARENESS_CONTEXT_PER_MONITOR_V2 = -4
 
 
 def _log(player, message: str) -> None:
@@ -35,6 +37,29 @@ def _log(player, message: str) -> None:
         player.write_log(message)
     except Exception:
         print(f"[WhatsAppCall] {message}")
+
+
+def _make_dpi_aware() -> None:
+    """Make the watcher thread use the same physical coordinate space as mss."""
+    if platform.system() != "Windows":
+        return
+    try:
+        user32 = ctypes.windll.user32
+        fn = getattr(user32, "SetThreadDpiAwarenessContext", None)
+        if fn is not None:
+            fn(ctypes.c_void_p(_DPI_AWARENESS_CONTEXT_PER_MONITOR_V2))
+            return
+        shcore = ctypes.windll.shcore
+        shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        pass
+
+
+def _click_screen(x: int, y: int) -> None:
+    """Move to a visually detected target before clicking it."""
+    pyautogui.moveTo(int(x), int(y), duration=0.08)
+    time.sleep(0.06)
+    pyautogui.click(int(x), int(y))
 
 
 def _capture_screen() -> tuple[bytes, float, float, int, int, Image.Image]:
@@ -95,55 +120,49 @@ def _vision(image_bytes: bytes) -> dict | None:
     from core import gemini
 
     prompt = r"""
-You are a visual UI detector for an automation program.
+You are a visual UI detector for a desktop automation program.
 
-Look at the ENTIRE desktop screenshot, not just the foreground window.
+Inspect the ENTIRE Windows desktop screenshot and identify an active WhatsApp
+Desktop incoming voice/video call or an already-connected WhatsApp call.
 
-Your only task is to detect an ACTIVE INCOMING WHATSAPP CALL displayed anywhere
-on the Windows desktop. The caller may appear in:
-- the main WhatsApp Desktop window,
-- a separate WhatsApp call window,
-- a small always-on-top incoming-call popup,
-- a notification-style call card.
+The call can be the main WhatsApp window, a separate call window, floating
+popup, or notification-style call card. Do not require the word WhatsApp to be
+visible if the visual layout is clearly a WhatsApp call.
 
-Do NOT require the text "WhatsApp" to be visible if the visual layout clearly
-matches a WhatsApp incoming voice/video call.
+Ignore chats, messages, settings, contact cards, ordinary Windows notifications,
+and outgoing calls.
 
-Ignore:
-- normal WhatsApp chats,
-- contact cards,
-- message notifications,
-- ordinary Windows notifications,
-- WhatsApp settings,
-- outgoing calls started by the user,
-- any screen that is not actively ringing.
-
-Return ONLY one JSON object:
+Return ONLY JSON:
 {
   "state": "incoming" | "connected" | "none",
   "confidence": 0.0,
-  "answer_x": null,
-  "answer_y": null,
-  "end_x": null,
-  "end_y": null
+
+  "answer_box": [x1,y1,x2,y2] | null,
+  "decline_box": [x1,y1,x2,y2] | null,
+  "end_box": [x1,y1,x2,y2] | null,
+
+  "answer_x": integer | null,
+  "answer_y": integer | null,
+  "decline_x": integer | null,
+  "decline_y": integer | null,
+  "end_x": integer | null,
+  "end_y": integer | null
 }
 
-Coordinate rules:
-- Coordinates are PIXELS IN THIS EXACT SCREENSHOT.
-- (0,0) is the screenshot's top-left corner.
-- For "incoming", answer_x/answer_y MUST be the center of the green
-  Answer/Accept button.
-- For "connected", end_x/end_y MUST be the center of the red End/Hang Up button.
-- Never guess coordinates. Use null when the button is not clearly visible.
+Coordinates are PIXELS IN THIS EXACT SCREENSHOT. (0,0) is the screenshot's
+top-left corner.
 
-State rules:
-- "incoming": the call is visibly ringing NOW and an Answer/Accept button is
-  visible.
-- "connected": the call is visibly connected NOW and a red End/Hang Up control
-  is visible.
-- "none": everything else.
+For an incoming call:
+- answer_box is the complete green Answer/Accept button.
+- decline_box is the complete red Decline/Reject button.
+- answer_x/y and decline_x/y are the centers of those boxes.
 
-Set confidence between 0 and 1. Do not include markdown fences or explanations.
+For a connected call:
+- end_box is the complete red End/Hang Up button.
+- end_x/y is its center.
+
+Never guess coordinates. Use null when a button is not clearly visible.
+Do not return markdown or explanations.
 """.strip()
 
     try:
@@ -168,6 +187,38 @@ def _coord(value) -> int | None:
         return n if n >= 0 else None
     except Exception:
         return None
+
+
+def _box(value):
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        return None
+    try:
+        x1, y1, x2, y2 = [int(float(v)) for v in value]
+    except Exception:
+        return None
+    if x1 < 0 or y1 < 0 or x2 <= x1 or y2 <= y1:
+        return None
+    return x1, y1, x2, y2
+
+
+def _center(box):
+    if not box:
+        return None
+    return ((box[0] + box[2]) // 2, (box[1] + box[3]) // 2)
+
+
+def _valid_box(box, width: int, height: int):
+    if not box:
+        return None
+    x1, y1, x2, y2 = box
+    if x1 >= width or y1 >= height or x2 <= 0 or y2 <= 0:
+        return None
+    return (
+        max(0, min(width - 1, x1)),
+        max(0, min(height - 1, y1)),
+        max(1, min(width, x2)),
+        max(1, min(height, y2)),
+    )
 
 
 class WhatsAppCallWatcher:
@@ -216,6 +267,7 @@ class WhatsAppCallWatcher:
                 _log(self.player, "[WhatsAppCall] Windows desktop automation is required.")
                 return
 
+            _make_dpi_aware()
             last_vision = 0.0
             previous_image = None
 
@@ -261,24 +313,45 @@ class WhatsAppCallWatcher:
                 if confidence < _CONFIDENCE:
                     state = "none"
 
+                answer_box = _valid_box(_box(result.get("answer_box")), image.width, image.height)
+                decline_box = _valid_box(_box(result.get("decline_box")), image.width, image.height)
+                end_box = _valid_box(_box(result.get("end_box")), image.width, image.height)
+
                 answer_x = _coord(result.get("answer_x"))
                 answer_y = _coord(result.get("answer_y"))
+                decline_x = _coord(result.get("decline_x"))
+                decline_y = _coord(result.get("decline_y"))
                 end_x = _coord(result.get("end_x"))
                 end_y = _coord(result.get("end_y"))
 
+                answer_center = _center(answer_box) or (
+                    (answer_x, answer_y)
+                    if answer_x is not None and answer_y is not None
+                    else None
+                )
+                decline_center = _center(decline_box) or (
+                    (decline_x, decline_y)
+                    if decline_x is not None and decline_y is not None
+                    else None
+                )
+                end_center = _center(end_box) or (
+                    (end_x, end_y)
+                    if end_x is not None and end_y is not None
+                    else None
+                )
+
                 if state == "incoming" and not self._owned_call:
-                    if answer_x is None or answer_y is None:
+                    if answer_center is None:
                         _log(self.player, "[WhatsAppCall] Incoming-call visuals detected, but Answer was not clear enough.")
                         continue
 
+                    click_x = origin_x + round(answer_center[0] * sx)
+                    click_y = origin_y + round(answer_center[1] * sy)
                     _log(
                         self.player,
-                        f"[WhatsAppCall] Visual detector found an incoming call "
-                        f"at ({round(answer_x * sx)},{round(answer_y * sy)}). Answering."
+                        f"[WhatsAppCall] Visual Answer target: ({click_x},{click_y}). Answering."
                     )
-                    click_x = origin_x + round(answer_x * sx)
-                    click_y = origin_y + round(answer_y * sy)
-                    pyautogui.click(click_x, click_y)
+                    _click_screen(click_x, click_y)
                     self._owned_call = True
                     self._message_sent = False
                     time.sleep(1.0)
@@ -325,13 +398,17 @@ class WhatsAppCallWatcher:
                         result2 = {}
 
                     state2 = str(result2.get("state") or "none").strip().lower()
+                    end_box2 = _valid_box(_box(result2.get("end_box")), image2.width, image2.height)
+                    end_center2 = _center(end_box2)
+
                     ex = _coord(result2.get("end_x"))
                     ey = _coord(result2.get("end_y"))
+                    if end_center2 is None and ex is not None and ey is not None:
+                        end_center2 = (ex, ey)
 
                     if (
                         state2 == "connected"
-                        and ex is not None
-                        and ey is not None
+                        and end_center2 is not None
                     ):
                         _log(self.player, "[WhatsAppCall] Visual detector found End Call. Ending the call.")
                         click_x2 = origin_x2 + round(ex * sx2)
@@ -371,12 +448,64 @@ _WATCHER: WhatsAppCallWatcher | None = None
 _WATCHER_LOCK = threading.Lock()
 
 
+def _one_shot_call_action(action: str, player=None) -> str:
+    """Visually find and click Answer or Decline on the current incoming call."""
+    if platform.system() != "Windows":
+        return "WhatsApp call control requires Windows."
+
+    _make_dpi_aware()
+
+    try:
+        image_bytes, sx, sy, origin_x, origin_y, image = _capture_screen()
+        result = _vision(image_bytes) or {}
+    except Exception as exc:
+        return f"Could not inspect the WhatsApp call visually: {exc}"
+
+    state = str(result.get("state") or "none").strip().lower()
+    try:
+        confidence = float(result.get("confidence") or 0.0)
+    except Exception:
+        confidence = 0.0
+
+    if state != "incoming" or confidence < _CONFIDENCE:
+        return "No active incoming WhatsApp call was visually confirmed."
+
+    box_key = "answer_box" if action == "answer" else "decline_box"
+    x_key = "answer_x" if action == "answer" else "decline_x"
+    y_key = "answer_y" if action == "answer" else "decline_y"
+
+    box = _valid_box(_box(result.get(box_key)), image.width, image.height)
+    center = _center(box)
+
+    if center is None:
+        x = _coord(result.get(x_key))
+        y = _coord(result.get(y_key))
+        center = (x, y) if x is not None and y is not None else None
+
+    if center is None:
+        return f"Visual detector found the incoming call but not the {action} button."
+
+    click_x = origin_x + round(center[0] * sx)
+    click_y = origin_y + round(center[1] * sy)
+
+    _log(player, f"[WhatsAppCall] Visual {action} target: ({click_x},{click_y})")
+    _click_screen(click_x, click_y)
+    return f"Visually located and clicked WhatsApp {action}."
+
+
+
 def whatsapp_call_rule(parameters: dict, player=None, speak=None) -> str:
     params = parameters or {}
     action = str(params.get("action") or "enable").strip().lower()
     message = " ".join(str(params.get("message") or _DEFAULT_MESSAGE).split()).strip()
 
     global _WATCHER
+
+    if action in {"answer", "accept"}:
+        return _one_shot_call_action("answer", player=player)
+
+    if action in {"decline", "reject"}:
+        return _one_shot_call_action("decline", player=player)
 
     with _WATCHER_LOCK:
         if action in {"disable", "stop", "off"}:
@@ -416,7 +545,7 @@ TOOL = {
         "properties": {
             "action": {
                 "type": "STRING",
-                "description": "enable (default), disable, or status",
+                "description": "enable (default), disable, status, answer, or decline",
             },
             "message": {
                 "type": "STRING",
