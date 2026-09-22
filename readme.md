@@ -417,6 +417,8 @@ While the rule is active, JARVIS watches the Windows desktop and uses Gemini vis
 
 The rule is process-local. It stays active until you say to stop automatic WhatsApp call answering or until JARVIS exits.
 
+This automation applies to **WhatsApp Desktop on the JARVIS PC**. WhatsApp must be open, signed in, and able to show the incoming call window on the desktop. JARVIS does not answer the native cellular call UI on the phone itself.
+
 ### Caller audio routing
 
 JARVIS's normal speech playback is not automatically a Windows microphone device. For the caller to hear JARVIS clearly, WhatsApp needs a microphone route that receives the JARVIS output.
