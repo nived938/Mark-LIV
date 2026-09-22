@@ -13,12 +13,9 @@ The rule is process-local: it stays active until disabled or JARVIS exits.
 from __future__ import annotations
 
 import io
-import json
 import platform
-import re
 import threading
 import time
-from pathlib import Path
 
 from PIL import Image, ImageChops
 import pyautogui
@@ -30,13 +27,6 @@ _POLL_SECONDS = 0.75
 _VISION_COOLDOWN = 1.75
 _MIN_CHANGE = 2.5
 _CONFIDENCE = 0.78
-
-
-def _base_dir() -> Path:
-    return Path(__file__).resolve().parent.parent
-
-
-_CONFIG = _base_dir() / "config" / "api_keys.json"
 
 
 def _log(player, message: str) -> None:
@@ -92,7 +82,6 @@ def _changed(previous: Image.Image | None, current: Image.Image) -> bool:
 
 
 def _vision(image_bytes: bytes) -> dict | None:
-    from google import genai  # noqa: F401
     from google.genai import types as gtypes
     from core import gemini
 
@@ -185,6 +174,11 @@ class WhatsAppCallWatcher:
 
     def stop(self) -> str:
         self._stop.set()
+        try:
+            from core import call_audio
+            call_audio.stop()
+        except Exception:
+            pass
         return "WhatsApp auto-reply disabled."
 
     def _run(self) -> None:
@@ -195,12 +189,9 @@ class WhatsAppCallWatcher:
 
             previous_image = None
             last_vision = 0.0
-            last_state = "none"
 
             while not self._stop.wait(_POLL_SECONDS):
                 if not _has_whatsapp_window():
-                    if not self._owned_call:
-                        last_state = "none"
                     continue
 
                 try:
@@ -213,7 +204,10 @@ class WhatsAppCallWatcher:
                 changed = _changed(previous_image, image)
                 previous_image = image
 
-                if not changed and now - last_vision < _VISION_COOLDOWN:
+                # Do not spend a Gemini vision request on an unchanged desktop.
+                # The incoming popup and the connected-call UI both create a
+                # screen change, so each state transition is still inspected.
+                if not changed:
                     continue
                 if now - last_vision < _VISION_COOLDOWN:
                     continue
@@ -306,7 +300,6 @@ class WhatsAppCallWatcher:
 
                     self._owned_call = False
                     self._message_sent = False
-                    last_state = "none"
                     continue
 
                 if self._owned_call and state == "none":
@@ -320,7 +313,6 @@ class WhatsAppCallWatcher:
                     except Exception:
                         pass
 
-                last_state = state
 
         except Exception as exc:
             _log(self.player, f"[WhatsAppCall] Watcher stopped unexpectedly: {exc}")
