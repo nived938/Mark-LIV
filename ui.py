@@ -3048,6 +3048,7 @@ class MainWindow(QMainWindow):
     _camera_sig     = pyqtSignal(bytes)      # show camera frame preview (small overlay)
     _cam_stream_sig = pyqtSignal(bool)       # True=start live stream, False=stop
     _map_sig        = pyqtSignal(str)       # open requested location in HUD map
+    _map_close_sig  = pyqtSignal()       # close map on the Qt main thread
     _cam_frame_sig  = pyqtSignal(bytes)      # live camera frame → HUD area
     _clipboard_sig  = pyqtSignal(str)        # clipboard text changed (thread-safe)
     _confirm_sig    = pyqtSignal(str, str)   # (title, detail) — irreversible-action gate
@@ -3216,6 +3217,7 @@ class MainWindow(QMainWindow):
         self._cam_stream_sig.connect(self._on_cam_stream)
         self._cam_frame_sig.connect(self._on_cam_frame)
         self._map_sig.connect(self._on_map)
+        self._map_close_sig.connect(self.close_map)
         self._clipboard_sig.connect(self._show_clipboard_panel)
         self._wake_dl_sig.connect(self._on_wake_install_done)
         self._quiz_sig.connect(self._show_quiz)
@@ -5533,8 +5535,8 @@ class JarvisUI:
         self._win._map_sig.emit(str(location or "").strip())
 
     def close_map(self) -> None:
-        """Thread-safe: close the HUD map."""
-        self._win.close_map()
+        """Thread-safe: close the HUD map on the Qt main thread."""
+        self._win._map_close_sig.emit()
     def show_quiz(self, topic: str, questions, grade=None) -> None:
         """Thread-safe: put an interactive quiz on the board.
 
