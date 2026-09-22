@@ -226,9 +226,14 @@ def whatsapp_call_rule(parameters: dict, player=None, speak=None) -> str:
 
     with _WATCHER_LOCK:
         if action in {"disable", "stop", "off"}:
+            agent = get_incoming_agent()
             if _WATCHER is not None:
+                try:
+                    agent.remove_callback(_WATCHER.on_incoming)
+                except Exception:
+                    pass
                 _WATCHER = None
-            get_incoming_agent().stop()
+            agent.stop()
             try:
                 from core import call_audio
                 call_audio.stop()
@@ -253,7 +258,7 @@ def whatsapp_call_rule(parameters: dict, player=None, speak=None) -> str:
         _WATCHER = auto
 
         agent = get_incoming_agent()
-        agent.on_incoming = auto.on_incoming
+        agent.add_callback(auto.on_incoming)
         agent.start()
 
         return (
